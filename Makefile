@@ -1,43 +1,64 @@
-TARGET := kernel.elf
-CC := riscv64-unknown-elf-gcc
-AS := riscv64-unknown-elf-as
-LD := riscv64-unknown-elf-ld
-OBJCOPY := riscv64-unknown-elf-objcopy
-OBJDUMP := riscv64-unknown-elf-objdump
+# 工具链
+CC = riscv64-unknown-elf-gcc
+OBJDUMP = riscv64-unknown-elf-objdump
+OBJCOPY = riscv64-unknown-elf-objcopy
+LD = riscv64-unknown-elf-ld
 
-CFLAGS = -Wall -O2 -ffreestanding -nostdlib -nostartfiles -march=rv64g -mabi=lp64d -mcmodel=medany
-LDFLAGS = -T kernel/kernel.ld
+# 编译选项
+CFLAGS = -Wall -O2 -ffreestanding -nostdlib -nostartfiles \
+         -march=rv64g -mabi=lp64d -mcmodel=medany \
+         -I include
 
-INCLUDES = -I include
+# 链接脚本
+LINKER_SCRIPT = kernel/kernel.ld
 
-# 源文件
-ASM_SRCS = $(wildcard kernel/boot/*.S)
-C_SRCS = $(wildcard kernel/*.c)
+# 内核目标文件
+KERNEL_ELF = kernel.elf
+KERNEL_BIN = kernel.bin
 
-# 目标文件
-ASM_OBJS = $(ASM_SRCS:.S=.o)
-C_OBJS = $(C_SRCS:.c=.o)
-OBJS = $(ASM_OBJS) $(C_OBJS)
+# 内核对象文件
+KERNEL_OBJS = kernel/boot/entry.o \
+              kernel/main.o \
+              kernel/printf.o \
+              kernel/uart.o
 
-all: $(TARGET)
+# 默认目标
+.PHONY: all clean qemu
 
-$(TARGET): $(OBJS)
-	$(LD) $(LDFLAGS) -o $@ $^
-	$(OBJDUMP) -S $@ > kernel.asm
-	$(OBJDUMP) -t $@ | sed '1,/SYMBOL TABLE/d; s/ .* / /; /^$$/d' > kernel.sym
+all: $(KERNEL_ELF) $(KERNEL_BIN) kernel.asm kernel.sym
+	@echo "Build complete!"
 
-%.o: %.c
-	$(CC) $(CFLAGS) $(INCLUDES) -c -o $@ $<
+# 链接内核
+$(KERNEL_ELF): $(KERNEL_OBJS)
+	$(LD) -T $(LINKER_SCRIPT) -o $@ $^
+	@echo "Linking complete!"
 
-%.o: %.S
-	$(CC) $(CFLAGS) $(INCLUDES) -c -o $@ $<
+# 生成二进制文件
+$(KERNEL_BIN): $(KERNEL_ELF)
+	$(OBJCOPY) -O binary $< $@
 
-run: $(TARGET)
-	qemu-system-riscv64 -machine virt -nographic -bios none -kernel $(TARGET)
+# 生成反汇编文件
+kernel.asm: $(KERNEL_ELF)
+	$(OBJDUMP) -S $< > $@
 
-qemu: run
+# 生成符号表
+kernel.sym: $(KERNEL_ELF)
+	$(OBJDUMP) -t $< | sed '1,/SYMBOL TABLE/d; s/ .* / /; /^$$/d' > $@
 
+# 编译C源文件
+kernel/%.o: kernel/%.c
+	$(CC) $(CFLAGS) -c -o $@ $<
+
+# 编译汇编源文件
+kernel/boot/%.o: kernel/boot/%.S
+	$(CC) $(CFLAGS) -c -o $@ $<
+	@echo "Compiled $<"
+
+# 清理
 clean:
-	rm -f $(OBJS) $(TARGET) kernel.asm kernel.sym
+	rm -f $(KERNEL_ELF) $(KERNEL_BIN) kernel.asm kernel.sym $(KERNEL_OBJS)
+	@echo "Cleanup complete!"
 
-.PHONY: all clean run qemu
+# 运行QEMU
+qemu: all
+	qemu-system-riscv64 -machine virt -nographic -bios none -kernel $(KERNEL_ELF)
