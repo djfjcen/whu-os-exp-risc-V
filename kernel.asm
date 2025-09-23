@@ -304,9 +304,9 @@ Disassembly of section .text:
     80000450:	c6dff0ef          	jal	800000bc <basic_format_test>
     80000454:	d31ff0ef          	jal	80000184 <boundary_test>
     80000458:	d91ff0ef          	jal	800001e8 <color_test>
-    8000045c:	e51ff0ef          	jal	800002ac <screen_test>
-    80000460:	be5ff0ef          	jal	80000044 <performance_test>
-    80000464:	f7dff0ef          	jal	800003e0 <error_recovery_test>
+    8000045c:	be9ff0ef          	jal	80000044 <performance_test>
+    80000460:	f81ff0ef          	jal	800003e0 <error_recovery_test>
+    80000464:	e49ff0ef          	jal	800002ac <screen_test>
     80000468:	00001517          	auipc	a0,0x1
     8000046c:	0a050513          	add	a0,a0,160 # 80001508 <uart_puts+0x91c>
     80000470:	77c000ef          	jal	80000bec <uart_puts>
