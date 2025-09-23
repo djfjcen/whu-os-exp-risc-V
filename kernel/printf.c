@@ -1,5 +1,6 @@
 #include "uart.h"
 #include <stdarg.h>
+#include <stdint.h>
 
 // 数字转字符表
 static const char digits[] = "0123456789ABCDEF";

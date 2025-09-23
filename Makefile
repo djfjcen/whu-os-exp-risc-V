@@ -20,7 +20,9 @@ KERNEL_BIN = kernel.bin
 KERNEL_OBJS = kernel/boot/entry.o \
               kernel/main.o \
               kernel/printf.o \
-              kernel/uart.o
+              kernel/uart.o \
+              kernel/kalloc.o \
+              kernel/vm.o
 
 # 默认目标
 .PHONY: all clean qemu
