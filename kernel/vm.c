@@ -50,6 +50,50 @@ typedef uint64_t* pagetable_t;
 void* alloc_page(void);
 void free_page(void* page);
 
+// 页面替换相关定义
+#define MAX_SWAPPED_PAGES 1024      // 最大交换页面数量
+#define SWAP_NONE 0xFFFFFFFF         // 无效交换索引
+#define PAGE_FRAME_MAX 256           // 最大物理页帧数
+
+// 页面状态定义
+#define PAGE_PRESENT  (1 << 0)       // 页面在内存中
+#define PAGE_SWAPPED  (1 << 1)       // 页面已交换出去
+#define PAGE_DIRTY    (1 << 2)       // 页面已修改
+#define PAGE_ACCESSED (1 << 3)       // 页面最近被访问
+
+// 页面描述符结构
+struct page_desc {
+    uint64_t vaddr;                  // 虚拟地址
+    uint64_t paddr;                  // 物理地址
+    uint32_t swap_offset;            // 交换区偏移
+    uint32_t flags;                  // 页面状态标志
+    struct page_desc* prev;          // LRU链表前驱
+    struct page_desc* next;          // LRU链表后继
+    pagetable_t pagetable;          // 所属页表
+};
+
+// 交换区管理结构
+struct swap_manager {
+    uint32_t swap_bitmap[MAX_SWAPPED_PAGES / 32]; // 交换区位图
+    uint32_t next_free;              // 下一个空闲交换块
+    uint32_t total_pages;            // 总交换页面数
+    uint32_t used_pages;             // 已使用页面数
+};
+
+// LRU页面管理结构
+struct lru_manager {
+    struct page_desc* head;          // LRU链表头
+    struct page_desc* tail;          // LRU链表尾
+    struct page_desc page_pool[PAGE_FRAME_MAX]; // 页面描述符池
+    uint32_t active_pages;           // 活跃页面数
+    uint32_t max_pages;              // 最大页面数
+};
+
+// 全局变量声明
+static struct swap_manager swap_mgr;
+static struct lru_manager lru_mgr;
+static uint8_t swap_area[MAX_SWAPPED_PAGES * PAGE_SIZE]; // 模拟交换区
+
 // 内核页表
 pagetable_t kernel_pagetable;
 
@@ -61,6 +105,19 @@ void destroy_pagetable(pagetable_t pt);
 void kvminit(void);
 void kvminithart(void);
 void dump_pagetable(pagetable_t pt, int level);
+
+// 页面替换相关函数声明
+void init_page_replacement(void);
+int handle_page_fault(pagetable_t pt, uint64_t va, int perm);
+struct page_desc* find_victim_page(void);
+int swap_out_page(struct page_desc* page);
+int swap_in_page(struct page_desc* page, uint64_t paddr);
+void lru_add_page(struct page_desc* page);
+void lru_remove_page(struct page_desc* page);
+void lru_touch_page(uint64_t va);
+struct page_desc* find_page_desc(uint64_t va);
+uint32_t alloc_swap_slot(void);
+void free_swap_slot(uint32_t slot);
 
 // 页表遍历函数（内部使用）
 static pte_t* walk_create(pagetable_t pagetable, uint64_t va);
@@ -114,6 +171,27 @@ int map_page(pagetable_t pt, uint64_t va, uint64_t pa, int perm) {
     
     // 设置页表项
     *pte = PA2PTE(pa) | perm | PTE_V;
+    
+    // 如果启用了页面替换，添加页面跟踪
+    if (lru_mgr.max_pages > 0) {
+        // 查找空闲的页面描述符
+        for (int i = 0; i < PAGE_FRAME_MAX; i++) {
+            if (lru_mgr.page_pool[i].flags == 0) {
+                struct page_desc* page = &lru_mgr.page_pool[i];
+                page->vaddr = va & ~(PAGE_SIZE - 1);
+                page->paddr = pa;
+                page->pagetable = pt;
+                page->swap_offset = SWAP_NONE;
+                page->flags = PAGE_PRESENT;
+                if (perm & PTE_W) {
+                    page->flags |= PAGE_DIRTY;
+                }
+                lru_add_page(page);
+                break;
+            }
+        }
+    }
+    
     return 0;
 }
 
@@ -203,6 +281,9 @@ static pte_t* walk_lookup(pagetable_t pagetable, uint64_t va) {
 
 // 初始化内核页表
 void kvminit(void) {
+    // 初始化页面替换系统
+    init_page_replacement();
+    
     // 创建内核页表
     kernel_pagetable = create_pagetable();
     if (kernel_pagetable == 0) {
@@ -224,9 +305,13 @@ void kvminit(void) {
     map_region(kernel_pagetable, (uint64_t)data_start, (uint64_t)data_start,
                (uint64_t)data_end - (uint64_t)data_start, PTE_R | PTE_W);
     
-    // 映射内核BSS段和堆（R+W权限）
+    // 映射内核BSS段（R+W权限）
     map_region(kernel_pagetable, (uint64_t)bss_start, (uint64_t)bss_start,
-               (uint64_t)PHYSTOP - (uint64_t)bss_start, PTE_R | PTE_W);
+               (uint64_t)bss_end - (uint64_t)bss_start, PTE_R | PTE_W);
+    
+    // 映射内核堆空间（从BSS结束到物理内存结束，R+W权限）
+    map_region(kernel_pagetable, (uint64_t)end, (uint64_t)end,
+               (uint64_t)PHYSTOP - (uint64_t)end, PTE_R | PTE_W);
     
     // 映射设备内存（UART等）（R+W权限）
     map_region(kernel_pagetable, UART0, UART0, PAGE_SIZE, PTE_R | PTE_W);
@@ -328,4 +413,478 @@ void dump_pagetable(pagetable_t pt, int level) {
             }
         }
     }
+}
+
+// 页面替换系统实现
+
+// 初始化页面替换系统
+void init_page_replacement(void) {
+    // 初始化交换管理器
+    swap_mgr.next_free = 0;
+    swap_mgr.total_pages = MAX_SWAPPED_PAGES;
+    swap_mgr.used_pages = 0;
+    
+    // 清空交换区位图
+    for (int i = 0; i < MAX_SWAPPED_PAGES / 32; i++) {
+        swap_mgr.swap_bitmap[i] = 0;
+    }
+    
+    // 初始化LRU管理器
+    lru_mgr.head = 0;
+    lru_mgr.tail = 0;
+    lru_mgr.active_pages = 0;
+    lru_mgr.max_pages = PAGE_FRAME_MAX;
+    
+    // 初始化页面描述符池
+    for (int i = 0; i < PAGE_FRAME_MAX; i++) {
+        lru_mgr.page_pool[i].vaddr = 0;
+        lru_mgr.page_pool[i].paddr = 0;
+        lru_mgr.page_pool[i].swap_offset = SWAP_NONE;
+        lru_mgr.page_pool[i].flags = 0;
+        lru_mgr.page_pool[i].prev = 0;
+        lru_mgr.page_pool[i].next = 0;
+        lru_mgr.page_pool[i].pagetable = 0;
+    }
+}
+
+// 分配交换区槽位
+uint32_t alloc_swap_slot(void) {
+    if (swap_mgr.used_pages >= swap_mgr.total_pages) {
+        return SWAP_NONE; // 交换区已满
+    }
+    
+    // 查找空闲槽位
+    for (uint32_t i = swap_mgr.next_free; i < swap_mgr.total_pages; i++) {
+        uint32_t word_idx = i / 32;
+        uint32_t bit_idx = i % 32;
+        
+        if (!(swap_mgr.swap_bitmap[word_idx] & (1 << bit_idx))) {
+            // 找到空闲槽位
+            swap_mgr.swap_bitmap[word_idx] |= (1 << bit_idx);
+            swap_mgr.used_pages++;
+            swap_mgr.next_free = (i + 1) % swap_mgr.total_pages;
+            return i;
+        }
+    }
+    
+    // 从头开始查找
+    for (uint32_t i = 0; i < swap_mgr.next_free; i++) {
+        uint32_t word_idx = i / 32;
+        uint32_t bit_idx = i % 32;
+        
+        if (!(swap_mgr.swap_bitmap[word_idx] & (1 << bit_idx))) {
+            swap_mgr.swap_bitmap[word_idx] |= (1 << bit_idx);
+            swap_mgr.used_pages++;
+            swap_mgr.next_free = (i + 1) % swap_mgr.total_pages;
+            return i;
+        }
+    }
+    
+    return SWAP_NONE; // 没有找到空闲槽位
+}
+
+// 释放交换区槽位
+void free_swap_slot(uint32_t slot) {
+    if (slot >= swap_mgr.total_pages || slot == SWAP_NONE) {
+        return; // 无效槽位
+    }
+    
+    uint32_t word_idx = slot / 32;
+    uint32_t bit_idx = slot % 32;
+    
+    if (swap_mgr.swap_bitmap[word_idx] & (1 << bit_idx)) {
+        swap_mgr.swap_bitmap[word_idx] &= ~(1 << bit_idx);
+        swap_mgr.used_pages--;
+        if (slot < swap_mgr.next_free) {
+            swap_mgr.next_free = slot;
+        }
+    }
+}
+
+// 查找页面描述符
+struct page_desc* find_page_desc(uint64_t va) {
+    for (int i = 0; i < PAGE_FRAME_MAX; i++) {
+        if (lru_mgr.page_pool[i].vaddr == (va & ~(PAGE_SIZE - 1)) && 
+            lru_mgr.page_pool[i].flags & PAGE_PRESENT) {
+            return &lru_mgr.page_pool[i];
+        }
+    }
+    return 0;
+}
+
+// 添加页面到LRU链表头部（最近使用）
+void lru_add_page(struct page_desc* page) {
+    if (!page) return;
+    
+    page->next = lru_mgr.head;
+    page->prev = 0;
+    
+    if (lru_mgr.head) {
+        lru_mgr.head->prev = page;
+    } else {
+        lru_mgr.tail = page;
+    }
+    
+    lru_mgr.head = page;
+    lru_mgr.active_pages++;
+}
+
+// 从LRU链表中移除页面
+void lru_remove_page(struct page_desc* page) {
+    if (!page) return;
+    
+    if (page->prev) {
+        page->prev->next = page->next;
+    } else {
+        lru_mgr.head = page->next;
+    }
+    
+    if (page->next) {
+        page->next->prev = page->prev;
+    } else {
+        lru_mgr.tail = page->prev;
+    }
+    
+    page->next = 0;
+    page->prev = 0;
+    lru_mgr.active_pages--;
+}
+
+// 更新页面访问时间（移动到链表头部）
+void lru_touch_page(uint64_t va) {
+    struct page_desc* page = find_page_desc(va);
+    if (page) {
+        lru_remove_page(page);
+        lru_add_page(page);
+    }
+}
+
+// 选择被替换的页面（LRU算法）
+struct page_desc* find_victim_page(void) {
+    if (!lru_mgr.tail) {
+        return 0; // 没有可替换的页面
+    }
+    
+    return lru_mgr.tail; // 返回最久未使用的页面
+}
+
+// 将页面换出到交换区
+int swap_out_page(struct page_desc* page) {
+    if (!page || !(page->flags & PAGE_PRESENT)) {
+        return -1; // 页面无效或不在内存中
+    }
+    
+    // 分配交换槽位
+    uint32_t swap_slot = alloc_swap_slot();
+    if (swap_slot == SWAP_NONE) {
+        return -1; // 交换区已满
+    }
+    
+    // 计算交换区地址
+    uint8_t* swap_addr = swap_area + swap_slot * PAGE_SIZE;
+    uint8_t* page_addr = (uint8_t*)page->paddr;
+    
+    // 如果页面是脏的，需要写入交换区
+    if (page->flags & PAGE_DIRTY) {
+        // 复制页面内容到交换区
+        for (int i = 0; i < PAGE_SIZE; i++) {
+            swap_addr[i] = page_addr[i];
+        }
+    }
+    
+    // 更新页面表项，标记为不存在
+    pte_t* pte = walk_lookup(page->pagetable, page->vaddr);
+    if (pte && (*pte & PTE_V)) {
+        *pte = (*pte & ~PTE_V) | (swap_slot << 10); // 在页表项中存储交换槽位
+    }
+    
+    // 更新页面描述符
+    page->swap_offset = swap_slot;
+    page->flags &= ~PAGE_PRESENT;
+    page->flags |= PAGE_SWAPPED;
+    
+    // 释放物理页面
+    free_page((void*)page->paddr);
+    page->paddr = 0;
+    
+    // 从LRU链表中移除
+    lru_remove_page(page);
+    
+    return 0;
+}
+
+// 将页面从交换区换入内存
+int swap_in_page(struct page_desc* page, uint64_t paddr) {
+    if (!page || !(page->flags & PAGE_SWAPPED)) {
+        return -1; // 页面无效或不在交换区
+    }
+    
+    // 计算交换区地址
+    uint8_t* swap_addr = swap_area + page->swap_offset * PAGE_SIZE;
+    uint8_t* page_addr = (uint8_t*)paddr;
+    
+    // 从交换区复制页面内容
+    for (int i = 0; i < PAGE_SIZE; i++) {
+        page_addr[i] = swap_addr[i];
+    }
+    
+    // 更新页面表项
+    pte_t* pte = walk_lookup(page->pagetable, page->vaddr);
+    if (pte) {
+        int perm = (*pte) & (PTE_R | PTE_W | PTE_X | PTE_U);
+        *pte = PA2PTE(paddr) | perm | PTE_V;
+    }
+    
+    // 更新页面描述符
+    page->paddr = paddr;
+    page->flags &= ~PAGE_SWAPPED;
+    page->flags |= PAGE_PRESENT;
+    
+    // 释放交换槽位
+    free_swap_slot(page->swap_offset);
+    page->swap_offset = SWAP_NONE;
+    
+    // 添加到LRU链表头部
+    lru_add_page(page);
+    
+    return 0;
+}
+
+// 处理页面缺失异常
+int handle_page_fault(pagetable_t pt, uint64_t va, int perm) {
+    uint64_t page_va = va & ~(PAGE_SIZE - 1);
+    
+    // 查找页面表项
+    pte_t* pte = walk_lookup(pt, page_va);
+    if (!pte) {
+        return -1; // 页面映射不存在
+    }
+    
+    // 检查页面是否在交换区
+    if (!(*pte & PTE_V) && (*pte != 0)) {
+        // 页面在交换区，需要换入
+        uint32_t swap_slot = (*pte) >> 10;
+        
+        // 分配物理页面
+        uint64_t paddr = (uint64_t)alloc_page();
+        if (!paddr) {
+            // 物理内存不足，需要换出一个页面
+            struct page_desc* victim = find_victim_page();
+            if (!victim) {
+                return -1; // 没有可替换的页面
+            }
+            
+            // 换出选中的页面
+            if (swap_out_page(victim) != 0) {
+                return -1; // 换出失败
+            }
+            
+            // 重新分配物理页面
+            paddr = (uint64_t)alloc_page();
+            if (!paddr) {
+                return -1; // 仍然无法分配内存
+            }
+        }
+        
+        // 查找对应的页面描述符
+        struct page_desc* page = 0;
+        for (int i = 0; i < PAGE_FRAME_MAX; i++) {
+            if (lru_mgr.page_pool[i].vaddr == page_va && 
+                lru_mgr.page_pool[i].flags & PAGE_SWAPPED &&
+                lru_mgr.page_pool[i].swap_offset == swap_slot) {
+                page = &lru_mgr.page_pool[i];
+                break;
+            }
+        }
+        
+        if (!page) {
+            // 创建新的页面描述符
+            for (int i = 0; i < PAGE_FRAME_MAX; i++) {
+                if (lru_mgr.page_pool[i].flags == 0) {
+                    page = &lru_mgr.page_pool[i];
+                    page->vaddr = page_va;
+                    page->pagetable = pt;
+                    page->swap_offset = swap_slot;
+                    page->flags = PAGE_SWAPPED;
+                    break;
+                }
+            }
+        }
+        
+        if (page && swap_in_page(page, paddr) == 0) {
+            return 0; // 换入成功
+        } else {
+            free_page((void*)paddr);
+            return -1; // 换入失败
+        }
+    }
+    
+    return -1; // 其他类型的页面缺失
+}
+
+// 获取虚拟地址对应的物理地址，支持页面替换
+uint64_t va2pa_with_replacement(pagetable_t pt, uint64_t va) {
+    pte_t* pte = walk_lookup(pt, va);
+    
+    if (!pte) {
+        return 0; // 页面映射不存在
+    }
+    
+    if (*pte & PTE_V) {
+        // 页面在内存中，更新访问记录
+        lru_touch_page(va);
+        return PTE2PA(*pte) + (va & (PAGE_SIZE - 1));
+    } else if (*pte != 0) {
+        // 页面在交换区，触发页面缺失处理
+        if (handle_page_fault(pt, va, PTE_R | PTE_W) == 0) {
+            pte = walk_lookup(pt, va);
+            if (pte && (*pte & PTE_V)) {
+                return PTE2PA(*pte) + (va & (PAGE_SIZE - 1));
+            }
+        }
+    }
+    
+    return 0; // 页面不可访问
+}
+
+// 安全的内存访问函数，支持页面替换
+int safe_copyout(pagetable_t pt, uint64_t dstva, char* src, uint64_t len) {
+    while (len > 0) {
+        uint64_t va0 = dstva & ~(PAGE_SIZE - 1);
+        uint64_t pa = va2pa_with_replacement(pt, va0);
+        
+        if (pa == 0) {
+            return -1; // 页面不可访问
+        }
+        
+        uint64_t n = PAGE_SIZE - (dstva - va0);
+        if (n > len) {
+            n = len;
+        }
+        
+        // 复制数据
+        char* dst = (char*)(pa + (dstva - va0));
+        for (uint64_t i = 0; i < n; i++) {
+            dst[i] = src[i];
+        }
+        
+        // 标记页面为脏
+        struct page_desc* page = find_page_desc(va0);
+        if (page) {
+            page->flags |= PAGE_DIRTY;
+        }
+        
+        len -= n;
+        src += n;
+        dstva = va0 + PAGE_SIZE;
+    }
+    
+    return 0;
+}
+
+// 安全的内存读取函数，支持页面替换
+int safe_copyin(pagetable_t pt, char* dst, uint64_t srcva, uint64_t len) {
+    while (len > 0) {
+        uint64_t va0 = srcva & ~(PAGE_SIZE - 1);
+        uint64_t pa = va2pa_with_replacement(pt, va0);
+        
+        if (pa == 0) {
+            return -1; // 页面不可访问
+        }
+        
+        uint64_t n = PAGE_SIZE - (srcva - va0);
+        if (n > len) {
+            n = len;
+        }
+        
+        // 复制数据
+        char* src = (char*)(pa + (srcva - va0));
+        for (uint64_t i = 0; i < n; i++) {
+            dst[i] = src[i];
+        }
+        
+        len -= n;
+        dst += n;
+        srcva = va0 + PAGE_SIZE;
+    }
+    
+    return 0;
+}
+
+// 页面替换测试函数
+void test_page_replacement(void) {
+    uart_puts("Testing page replacement system...\n");
+    
+    // 测试交换区管理
+    uart_puts("1. Testing swap slot allocation...\n");
+    uint32_t slot1 = alloc_swap_slot();
+    uint32_t slot2 = alloc_swap_slot();
+    uint32_t slot3 = alloc_swap_slot();
+    
+    if (slot1 != SWAP_NONE && slot2 != SWAP_NONE && slot3 != SWAP_NONE &&
+        slot1 != slot2 && slot2 != slot3 && slot1 != slot3) {
+        uart_puts("   Swap slot allocation: PASS\n");
+    } else {
+        uart_puts("   Swap slot allocation: FAIL\n");
+    }
+    
+    // 测试交换区释放
+    free_swap_slot(slot2);
+    uint32_t slot4 = alloc_swap_slot();
+    if (slot4 == slot2) {
+        uart_puts("   Swap slot free/realloc: PASS\n");
+    } else {
+        uart_puts("   Swap slot free/realloc: FAIL\n");
+    }
+    
+    // 测试LRU链表操作
+    uart_puts("2. Testing LRU operations...\n");
+    
+    // 重置LRU管理器
+    lru_mgr.head = 0;
+    lru_mgr.tail = 0;
+    lru_mgr.active_pages = 0;
+    
+    // 创建测试页面
+    struct page_desc test_pages[3];
+    for (int i = 0; i < 3; i++) {
+        test_pages[i].vaddr = 0x10000 + i * PAGE_SIZE;
+        test_pages[i].paddr = 0x80000000 + i * PAGE_SIZE;
+        test_pages[i].flags = PAGE_PRESENT;
+        test_pages[i].swap_offset = SWAP_NONE;
+        test_pages[i].next = 0;
+        test_pages[i].prev = 0;
+        test_pages[i].pagetable = kernel_pagetable;
+    }
+    
+    // 添加页面到LRU链表
+    lru_add_page(&test_pages[0]);
+    lru_add_page(&test_pages[1]);
+    lru_add_page(&test_pages[2]);
+    
+    if (lru_mgr.active_pages == 3 && lru_mgr.head == &test_pages[2] && 
+        lru_mgr.tail == &test_pages[0]) {
+        uart_puts("   LRU add operations: PASS\n");
+    } else {
+        uart_puts("   LRU add operations: FAIL\n");
+    }
+    
+    // 测试LRU移除
+    lru_remove_page(&test_pages[1]);
+    if (lru_mgr.active_pages == 2 && lru_mgr.head == &test_pages[2] && 
+        lru_mgr.tail == &test_pages[0]) {
+        uart_puts("   LRU remove operations: PASS\n");
+    } else {
+        uart_puts("   LRU remove operations: FAIL\n");
+    }
+    
+    // 测试受害页面选择
+    struct page_desc* victim = find_victim_page();
+    if (victim == &test_pages[0]) {
+        uart_puts("   Victim page selection: PASS\n");
+    } else {
+        uart_puts("   Victim page selection: FAIL\n");
+    }
+    
+    uart_puts("Page replacement test completed.\n");
 }

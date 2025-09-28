@@ -1,3 +1,4 @@
+#include "defs.h"
 #include <stdint.h>
 
 // 定义页面大小为4KB
@@ -81,19 +82,36 @@ void free_page(void* page) {
     freelist = r;
 }
 
-// 分配连续的n个页面
+// 分配连续的n个页面（链表扫描法，保证物理连续）
 void* alloc_pages(int n) {
     if (n <= 0) {
         return 0;
     }
-    
-    // 简单实现：逐个分配页面（不保证连续）
-    // 注意：当前实现不保证分配的页面是连续的
     if (n == 1) {
         return alloc_page();
     }
-    
-    // 更复杂的实现需要重新设计数据结构来跟踪连续内存块
-    // 这里暂时返回单个页面
-    return alloc_page();
+    struct run *prev = 0, *start = freelist, *cur = freelist;
+    int count = 1;
+    while (cur) {
+        struct run *next = cur->next;
+        if (count == n) {
+            if (prev)
+                prev->next = next;
+            else
+                freelist = next;
+            struct run *last = cur;
+            last->next = 0;
+            return start;
+        }
+        if (next && (uint64_t)next == (uint64_t)cur + PAGE_SIZE) {
+            cur = next;
+            count++;
+        } else {
+            prev = cur;
+            cur = cur->next;
+            start = cur;
+            count = 1;
+        }
+    }
+    return 0;
 }
