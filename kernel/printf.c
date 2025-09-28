@@ -4,7 +4,6 @@
 // 数字转字符表
 static const char digits[] = "0123456789ABCDEF";
 
-// 错误处理状态码
 typedef enum {
     PRINTF_OK = 0,
     PRINTF_ERROR_NULL_POINTER = -1,
@@ -92,7 +91,6 @@ void clear_line(void) {
 // 光标定位到指定位置
 void goto_xy(int x, int y) {
     // ANSI转义序列格式: \033[y;xH
-    // 手动构造转义序列，避免使用printf函数
     uart_putc(0x1B);  // ESC字符
     uart_putc('[');
     
@@ -173,28 +171,28 @@ int printf_color(color_t color, const char *fmt, ...) {
         }
 
         switch (*s) {
-            case 'd':  // 十进制整数
+            case 'd': 
                 print_number(va_arg(ap, int), 10, 1);
                 break;
 
-            case 'x':  // 十六进制整数
+            case 'x':
             case 'X':
                 print_number(va_arg(ap, int), 16, 0);
                 break;
 
-            case 's':  // 字符串
+            case 's':
                 print_string(va_arg(ap, const char *));
                 break;
 
-            case 'c':  // 字符
+            case 'c': 
                 uart_putc(va_arg(ap, int));
                 break;
 
-            case '%':  // 百分号
+            case '%': 
                 uart_putc('%');
                 break;
 
-            default:  // 未知格式符
+            default: 
                 uart_putc('%');
                 uart_putc(*s);
                 status = PRINTF_ERROR_INVALID_FORMAT;
