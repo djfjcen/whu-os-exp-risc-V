@@ -22,7 +22,14 @@ KERNEL_OBJS = kernel/boot/entry.o \
               kernel/printf.o \
               kernel/uart.o \
               kernel/kalloc.o \
-              kernel/vm.o
+              kernel/vm.o \
+              kernel/trap.o \
+              kernel/trap_asm.o \
+              kernel/kernelvec_asm.o \
+              kernel/interrupt_stack.o \
+              kernel/sbi.o \
+              kernel/timer.o \
+              kernel/scheduler.o
 
 # 默认目标
 .PHONY: all clean qemu
@@ -53,6 +60,16 @@ kernel/%.o: kernel/%.c
 
 # 编译汇编源文件
 kernel/boot/%.o: kernel/boot/%.S
+	$(CC) $(CFLAGS) -c -o $@ $<
+	@echo "Compiled $<"
+
+# 编译trap汇编文件
+kernel/trap_asm.o: kernel/trap.S
+	$(CC) $(CFLAGS) -c -o $@ $<
+	@echo "Compiled $<"
+
+# 编译kernelvec汇编文件
+kernel/kernelvec_asm.o: kernel/kernelvec.S
 	$(CC) $(CFLAGS) -c -o $@ $<
 	@echo "Compiled $<"
 

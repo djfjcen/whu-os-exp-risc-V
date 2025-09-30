@@ -4,6 +4,10 @@
 
 #define PAGE_SIZE 4096
 
+// 前向声明
+struct trap_frame;
+typedef int (*interrupt_handler_t)(int irq, void* data, struct trap_frame* tf);
+
 
 // 权限位定义
 #define PTE_R (1L << 1)  // 读权限
@@ -62,5 +66,23 @@ void test_page_replacement(void);
 // 页面替换演示函数声明
 void demonstrate_page_replacement(void);
 void print_page_replacement_info(void);
+
+// 中断系统函数声明
+void trap_init(void);
+int register_interrupt(int irq, interrupt_handler_t handler, void* data, const char* name, uint32_t flags, uint32_t priority);
+int unregister_interrupt(int irq, interrupt_handler_t handler);
+void enable_interrupt(int irq);
+void disable_interrupt(int irq);
+void enable_interrupts(void);
+void disable_interrupts(void);
+int is_interrupt_enabled(int irq);
+void set_interrupt_priority(int irq, uint32_t priority);
+uint32_t get_interrupt_priority(int irq);
+void print_interrupt_stats(void);
+void test_interrupt_system(void);
+
+// 系统函数声明
+void panic(const char* msg);
+int printf(const char* fmt, ...);
 
 #endif
