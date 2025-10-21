@@ -86,6 +86,15 @@ void usertrap(void);               // 用户态中断处理
 int devintr(void);                 // 设备中断分发
 void machine_timer_handler(void);  // Machine 模式时钟中断处理
 
+// 具体的中断/异常处理函数
+void handle_timer_interrupt(void);        // 定时器中断处理
+void handle_external_interrupt(void);     // 外部中断处理
+void handle_software_interrupt(void);     // 软件中断处理
+void handle_syscall(struct trapframe *tf); // 系统调用处理 (ECALL)
+void handle_trap_page_fault(struct trapframe *tf, int is_write); // 陷阱中的页故障处理
+void handle_illegal_instruction(struct trapframe *tf);      // 非法指令处理
+void handle_breakpoint(struct trapframe *tf);               // 断点处理
+
 // 中断处理向量表
 extern trap_handler_t trap_handlers[16];
 
