@@ -63,4 +63,10 @@ void test_page_replacement(void);
 void demonstrate_page_replacement(void);
 void print_page_replacement_info(void);
 
+// 中断和进程管理函数声明
+void trap_init(void);
+void trap_init_hart(void);
+void proc_init(void);
+void scheduler(void);
+
 #endif

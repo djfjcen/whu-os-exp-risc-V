@@ -66,6 +66,52 @@ static void print_number(int num, int base, int sign) {
     }
 }
 
+static void print_number_long(long num, int base, int sign) {
+    char buf[NUM_BUF_SIZE];
+    int i = NUM_BUF_SIZE - 1;
+    int negative = 0;
+    unsigned long n;
+
+    // 处理base参数错误的情况
+    if(base < 2 || base > 16) {
+        uart_puts("Invalid base\n");
+        return;
+    }
+
+    // 处理0的特殊情况
+    if(num == 0) {
+        uart_putc('0');
+        return;
+    }
+
+    // 处理负数
+    if(sign && num < 0) {
+        negative = 1;
+        n = -num;
+    } else {
+        n = num;
+    }
+
+    // 转换数字到字符
+    buf[i] = '\0';  // 字符串结束符
+    while(n) {
+        i--;
+        buf[i] = digits[n % base];
+        n /= base;
+    }
+
+    // 添加负号
+    if(negative) {
+        i--;
+        buf[i] = '-';
+    }
+
+    // 输出结果
+    while(buf[i]) {
+        uart_putc(buf[i++]);
+    }
+}
+
 // 输出字符串
 static void print_string(const char *s) {
     if (!s) {
@@ -235,14 +281,34 @@ int printf(const char *fmt, ...) {
             break;
         }
 
+        // 检查长整型修饰符
+        int is_long = 0;
+        if (*s == 'l') {
+            is_long = 1;
+            s++;
+            if (!*s) {
+                uart_putc('%');
+                uart_putc('l');
+                break;
+            }
+        }
+
         switch (*s) {
             case 'd':  // 十进制整数
-                print_number(va_arg(ap, int), 10, 1);
+                if (is_long) {
+                    print_number_long(va_arg(ap, long), 10, 1);
+                } else {
+                    print_number(va_arg(ap, int), 10, 1);
+                }
                 break;
 
             case 'x':  // 十六进制整数
             case 'X':
-                print_number(va_arg(ap, int), 16, 0);
+                if (is_long) {
+                    print_number_long(va_arg(ap, long), 16, 0);
+                } else {
+                    print_number(va_arg(ap, int), 16, 0);
+                }
                 break;
 
             case 's':  // 字符串
@@ -259,6 +325,9 @@ int printf(const char *fmt, ...) {
 
             default:  // 未知格式符
                 uart_putc('%');
+                if (is_long) {
+                    uart_putc('l');
+                }
                 uart_putc(*s);
                 status = PRINTF_ERROR_INVALID_FORMAT;
                 break;

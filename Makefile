@@ -22,7 +22,13 @@ KERNEL_OBJS = kernel/boot/entry.o \
               kernel/printf.o \
               kernel/uart.o \
               kernel/kalloc.o \
-              kernel/vm.o
+              kernel/vm.o \
+              kernel/trap.o \
+              kernel/proc.o \
+              kernel/machinevec.o \
+              kernel/kernelvec.o \
+              kernel/uservec.o \
+              kernel/swtch.o
 
 # 默认目标
 .PHONY: all clean qemu
@@ -52,6 +58,9 @@ kernel/%.o: kernel/%.c
 	$(CC) $(CFLAGS) -c -o $@ $<
 
 # 编译汇编源文件
+kernel/%.o: kernel/%.S
+	$(CC) $(CFLAGS) -c -o $@ $<
+
 kernel/boot/%.o: kernel/boot/%.S
 	$(CC) $(CFLAGS) -c -o $@ $<
 	@echo "Compiled $<"

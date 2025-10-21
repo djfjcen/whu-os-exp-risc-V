@@ -14,6 +14,35 @@ _entry:
     li t1, 'P'           
     sb t1, 0(t0)         
 
+    # ============================================================
+    # Machine模式初始化 - 时间中断配置
+    # ============================================================
+    
+    # 设置 Machine 模式中断向量
+    la t0, machinevec
+    csrw mtvec, t0
+    
+    # 启用 Machine 模式时钟中断
+    li t0, 0x80
+    csrw mie, t0              # MIE_MTIE = 1 << 7
+    
+    # 设置第一个时间中断
+    # 读取当前 mtime
+    li t0, 0x2000BFF8         # mtime 地址
+    ld t1, 0(t0)              # 读取 mtime
+    
+    # 计算下一个中断时间 (mtime + 1000000)
+    li t2, 1000000
+    add t3, t1, t2
+    
+    # 写入 mtimecmp
+    li t4, 0x2004000          # mtimecmp 地址
+    sd t3, 0(t4)              # 设置 mtimecmp
+    
+    # 启用全局中断
+    li t0, 0x8                # MSTATUS_MIE = 1 << 3
+    csrw mstatus, t0
+
     # 清零BSS段
     la t0, bss_start     # BSS段起始地址
     la t1, bss_end       # BSS段结束地址
