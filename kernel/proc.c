@@ -3,6 +3,10 @@
 #include "uart.h"
 #include "defs.h"
 
+// 前向声明
+extern volatile uint64 ticks;
+uint64 get_ticks(void);
+
 // 手动实现memset和memcpy（因为我们没有链接libc）
 static void* memset_impl(void *s, int c, unsigned long n) {
     char *p = (char *)s;
@@ -88,6 +92,7 @@ struct proc* alloc_proc(void) {
             // 分配陷阱帧
             p->trapframe = alloc_trapframe();
             if (!p->trapframe) {
+                uart_puts("[proc] Failed to allocate trapframe\n");
                 spin_unlock(&proc_lock);
                 return 0;
             }
@@ -95,6 +100,7 @@ struct proc* alloc_proc(void) {
             // 分配内核栈 (4KB)
             p->kstack = (char *)alloc_page();
             if (!p->kstack) {
+                uart_puts("[proc] Failed to allocate kernel stack\n");
                 free_trapframe(p->trapframe);
                 spin_unlock(&proc_lock);
                 return 0;
@@ -220,39 +226,64 @@ void set_current_proc(struct proc *p) {
     current_proc = p;
 }
 
+// 调度器的上下文 (调度器本身的执行状态)
+static struct context scheduler_context;
+static int scheduler_initialized = 0;
+
 /**
  * 简单的轮转调度器
  * 参考xv6的scheduler()实现
+ * 
+ * 调度算法：轮转调度
+ * - 遍历进程表，找到第一个RUNNABLE的进程
+ * - 通过switch_context切换到该进程
+ * - 当进程让出CPU时，恢复到scheduler继续循环
  */
 void scheduler(void) {
-    uart_puts("[proc] Scheduler started\n");
+    if (!scheduler_initialized) {
+        uart_puts("[proc] Scheduler started\n");
+        scheduler_initialized = 1;
+    }
     
     struct proc *p;
     struct cpu *c = &cpus[0];  // 单核
     c->proc = 0;
     
+    intr_off();  // 关闭中断
+    
     for (;;) {
         // 启用中断，允许设备中断
         intr_on();
         
-        // 查找第一个RUNNABLE进程
+        // 查找可运行的进程，使用轮转算法
         int found = 0;
-        for (p = proc; p < &proc[NPROC]; p++) {
+        static int last_index = 0;
+        
+        for (int i = 0; i < NPROC; i++) {
+            int idx = (last_index + i) % NPROC;
+            p = &proc[idx];
+            
             if (p->state == RUNNABLE) {
                 // 切换到这个进程
                 p->state = RUNNING;
                 c->proc = p;
                 current_proc = p;
                 
-                printf("[proc] Switching to process %d\n", p->pid);
+                // 保存scheduler的当前上下文
+                // 切换到进程的上下文
+                printf("[proc] Scheduler: switching to process %d\n", p->pid);
                 
-                // 执行进程 (这里是简化实现)
-                // 实际实现中，这里应该执行用户程序
-                // 在xv6中，通过上下文切换进入process_entry
+                intr_off();  // 关闭中断以保护上下文切换
                 
-                // 暂时为了测试，我们直接返回
-                p->state = RUNNABLE;
+                // 上下文切换: scheduler_context -> p->context
+                // switch_context保存当前(scheduler)的context，恢复目标进程的context
+                switch_context(&scheduler_context, &p->context);
                 
+                // 进程通过yield()回到这里
+                // 继续循环找下一个RUNNABLE进程
+                intr_on();
+                
+                last_index = (idx + 1) % NPROC;
                 found = 1;
                 break;
             }
@@ -260,29 +291,41 @@ void scheduler(void) {
         
         if (!found) {
             // 没有可运行的进程
-            uart_puts("[proc] No runnable process, idling...\n");
-            // 实际实现中应该等待中断
-            // 这里简化为返回
-            return;
+            printf("[proc] No runnable process, ticks=%ld\n", get_ticks());
         }
     }
 }
 
 /**
  * 放弃CPU，让出给其他进程
+ * 
+ * yield流程：
+ * 1. 关闭中断（保护）
+ * 2. 标记当前进程为RUNNABLE
+ * 3. 通过switch_context切换回scheduler
+ * 4. scheduler会选择下一个进程运行
  */
 void yield(void) {
     struct proc *p = current_proc;
-    if (p) {
-        spin_lock(&proc_lock);
-        if (p->state == RUNNING) {
-            p->state = RUNNABLE;
-        }
-        spin_unlock(&proc_lock);
-    }
+    if (!p) return;
     
-    // 调度到下一个进程
-    scheduler();
+    intr_off();  // 关闭中断
+    
+    spin_lock(&proc_lock);
+    if (p->state == RUNNING) {
+        p->state = RUNNABLE;
+    }
+    spin_unlock(&proc_lock);
+    
+    printf("[proc] Process %d yielding CPU\n", p->pid);
+    
+    // 上下文切换: 当前进程context -> scheduler context
+    // switch_context保存当前进程的context，恢复scheduler的context
+    // 这会回到scheduler()函数中的switch_context调用之后
+    switch_context(&p->context, &scheduler_context);
+    
+    // 当这个进程再次被调度时，会从这里继续执行
+    intr_on();  // 重新启用中断
 }
 
 /**

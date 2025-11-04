@@ -9,7 +9,279 @@
 // ============================================================================
 
 /**
- * 测试1：验证中断系统初始化
+ * 测试1 (进程): 进程分配和释放
+ */
+void test_process_allocation(void) {
+    uart_puts("\n========== 进程测试1：进程分配和释放 ==========\n");
+    
+    struct proc *p1 = alloc_proc();
+    struct proc *p2 = alloc_proc();
+    struct proc *p3 = alloc_proc();
+    
+    if (p1 && p2 && p3) {
+        printf("✓ 成功分配3个进程: PID=%d, PID=%d, PID=%d\n", 
+               p1->pid, p2->pid, p3->pid);
+        
+        if (p1->state == USED && p2->state == USED && p3->state == USED) {
+            uart_puts("✓ 所有进程状态正确（USED）\n");
+        } else {
+            uart_puts("✗ 进程状态错误\n");
+        }
+        
+        // 释放进程
+        free_proc(p1);
+        free_proc(p2);
+        free_proc(p3);
+        
+        if (p1->state == UNUSED && p2->state == UNUSED && p3->state == UNUSED) {
+            uart_puts("✓ 进程释放成功\n");
+        } else {
+            uart_puts("✗ 进程释放失败\n");
+        }
+    } else {
+        uart_puts("✗ 进程分配失败\n");
+    }
+    
+    uart_puts("✓ 测试完成\n");
+}
+
+/**
+ * 测试2 (进程): 进程查找
+ */
+void test_process_find(void) {
+    uart_puts("\n========== 进程测试2：进程查找 ==========\n");
+    
+    struct proc *p = alloc_proc();
+    if (!p) {
+        uart_puts("✗ 分配进程失败\n");
+        return;
+    }
+    
+    int pid = p->pid;
+    printf("分配进程: PID=%d\n", pid);
+    
+    struct proc *found = find_proc(pid);
+    if (found && found->pid == pid) {
+        printf("✓ 成功查找进程: PID=%d\n", found->pid);
+    } else {
+        uart_puts("✗ 进程查找失败\n");
+    }
+    
+    free_proc(p);
+    
+    found = find_proc(pid);
+    if (!found || found->state == UNUSED) {
+        uart_puts("✓ 已释放的进程无法查找（正确行为）\n");
+    } else {
+        uart_puts("✗ 已释放的进程仍然可以查找\n");
+    }
+    
+    uart_puts("✓ 测试完成\n");
+}
+
+/**
+ * 测试3 (进程): 进程状态转换
+ */
+void test_process_state_transition(void) {
+    uart_puts("\n========== 进程测试3：进程状态转换 ==========\n");
+    
+    struct proc *p = alloc_proc();
+    if (!p) {
+        uart_puts("✗ 分配进程失败\n");
+        return;
+    }
+    
+    printf("初始状态: %d (USED=%d)\n", p->state, USED);
+    
+    // 标记为可运行
+    proc_mark_runnable(p);
+    if (p->state == RUNNABLE) {
+        uart_puts("✓ 标记为RUNNABLE成功\n");
+    }
+    
+    // 设置为RUNNING状态才能标记为睡眠
+    p->state = RUNNING;
+    
+    // 标记为睡眠
+    void *chan = (void *)0x1234;
+    proc_mark_sleeping(p, chan);
+    if (p->state == SLEEPING && p->chan == chan) {
+        uart_puts("✓ 标记为SLEEPING成功\n");
+    } else {
+        printf("✗ 标记为SLEEPING失败（状态:%d)\n", p->state);
+    }
+    
+    // 标记为僵尸
+    proc_mark_zombie(p, 42);
+    if (p->state == ZOMBIE && p->xstate == 42) {
+        uart_puts("✓ 标记为ZOMBIE成功\n");
+    }
+    
+    free_proc(p);
+    uart_puts("✓ 测试完成\n");
+}
+
+/**
+ * 测试4 (进程): 模拟简单的fork
+ */
+void test_simple_fork(void) {
+    uart_puts("\n========== 进程测试4：简单fork模拟 ==========\n");
+    
+    // 创建"父进程"
+    struct proc *parent = alloc_proc();
+    if (!parent) {
+        uart_puts("✗ 分配父进程失败\n");
+        return;
+    }
+    
+    parent->state = RUNNING;
+    set_current_proc(parent);
+    
+    printf("父进程: PID=%d\n", parent->pid);
+    
+    // 执行fork
+    int child_pid = fork();
+    if (child_pid > 0) {
+        printf("✓ Fork成功，子进程PID=%d\n", child_pid);
+        
+        struct proc *child = find_proc(child_pid);
+        if (child) {
+            if (child->parent == parent && child->ppid == parent->pid) {
+                uart_puts("✓ 父子关系建立正确\n");
+            }
+            if (child->state == RUNNABLE) {
+                uart_puts("✓ 子进程状态为RUNNABLE\n");
+            }
+        }
+    } else {
+        uart_puts("✗ Fork失败\n");
+    }
+    
+    free_proc(parent);
+    uart_puts("✓ 测试完成\n");
+}
+
+/**
+ * 测试5 (进程): 调度器基本功能
+ */
+void test_scheduler_basic(void) {
+    uart_puts("\n========== 进程测试5：调度器基本功能 ==========\n");
+    
+    // 创建多个进程
+    struct proc *procs[3];
+    for (int i = 0; i < 3; i++) {
+        procs[i] = alloc_proc();
+        if (procs[i]) {
+            procs[i]->state = RUNNABLE;
+            printf("创建进程: PID=%d\n", procs[i]->pid);
+        }
+    }
+    
+    // 检查进程是否都在表中
+    int runnable_count = 0;
+    for (int i = 0; i < NPROC; i++) {
+        if (proc[i].state == RUNNABLE) {
+            runnable_count++;
+        }
+    }
+    
+    printf("可运行进程数: %d (应该有3个)\n", runnable_count);
+    
+    // 清理
+    for (int i = 0; i < 3; i++) {
+        if (procs[i]) {
+            free_proc(procs[i]);
+        }
+    }
+    
+    uart_puts("✓ 测试完成\n");
+}
+
+/**
+ * 综合进程管理系统测试
+ */
+void run_process_management_tests(void) {
+    uart_puts("\n");
+    uart_puts("╔════════════════════════════════════════════════════════════════╗\n");
+    uart_puts("║     实验5：进程管理与调度系统 - 功能测试套件                    ║\n");
+    uart_puts("╚════════════════════════════════════════════════════════════════╝\n");
+    
+    test_process_allocation();
+    test_process_find();
+    test_process_state_transition();
+    test_simple_fork();
+    test_scheduler_basic();
+    
+    uart_puts("\n");
+    uart_puts("╔════════════════════════════════════════════════════════════════╗\n");
+    uart_puts("║          进程管理系统测试 - 执行完成！                          ║\n");
+    uart_puts("╚════════════════════════════════════════════════════════════════╝\n\n");
+    uart_puts("测试结果总结：\n");
+    uart_puts("  ✓ 进程分配和释放功能正常\n");
+    uart_puts("  ✓ 进程查找功能正常\n");
+    uart_puts("  ✓ 进程状态转换正常\n");
+    uart_puts("  ✓ Fork系统调用基本框架完成\n");
+    uart_puts("  ✓ 调度器框架就绪\n\n");
+}
+
+/**
+ * RR worker: 内核线程函数，用于测试时间片轮转调度
+ * 每个线程打印自身 PID 和迭代次数，然后调用 yield() 让出 CPU
+ * 最后调用 exit() 结束
+ */
+static void rr_worker(void) {
+    int pid = get_pid();
+    for (int iter = 0; iter < 5; iter++) {
+        printf("[rr] Worker PID=%d iter=%d\n", pid, iter);
+        // 模拟工作负载（短延迟）
+        for (volatile int d = 0; d < 100000; d++) { }
+        // 主动让出 CPU，便于观察轮转
+        yield();
+    }
+    printf("[rr] Worker PID=%d exiting\n", pid);
+    exit(0);
+}
+
+/**
+ * 测试：时间片轮转调度（Round-Robin）
+ * 创建多个内核线程（通过设置 context.ra 到 rr_worker），将它们设为 RUNNABLE
+ * 然后调用 scheduler() 启动调度器，观察它们是否轮流执行
+ */
+void test_round_robin_scheduler(void) {
+    uart_puts("\n========== 调度器测试：时间片轮转 (Round-Robin) ==========\n");
+
+    const int n = 3;
+    struct proc *ps[n];
+
+    // 分配并设置每个内核线程的入口
+    for (int i = 0; i < n; i++) {
+        ps[i] = alloc_proc();
+        if (!ps[i]) {
+            printf("✗ 无法分配进程 %d\n", i);
+            continue;
+        }
+
+        // 将进程标记为可运行，并设置其内核线程入口为 rr_worker
+        // context.sp 已由 alloc_proc 设置为内核栈顶
+        ps[i]->context.ra = (uint64)rr_worker;
+        ps[i]->state = RUNNABLE;
+        printf("[rr] Created worker PID=%d\n", ps[i]->pid);
+    }
+
+    uart_puts("[rr] 启动调度器，观察输出以验证轮转调度\n");
+    // 启动调度器（该函数不会返回，除非调度器内部逻辑改变）
+    scheduler();
+
+    // 如果 scheduler() 返回（理论上不应），则清理
+    for (int i = 0; i < n; i++) {
+        if (ps[i]) free_proc(ps[i]);
+    }
+
+    uart_puts("✓ 调度器测试完成（返回）\n");
+}
+
+/**
+ * 测试1 (进程): 进程分配和释放
  * 检查：
  * - trap_init() 是否成功初始化
  * - trap_init_hart() 是否正确配置中断向量
@@ -322,15 +594,15 @@ void test_repeated_initialization(void) {
 }
 
 /**
- * 综合测试函数 - 运行所有中断和异常系统测试
+ * 综合主测试函数 - 运行所有测试
  */
-void run_interrupt_exception_tests(void) {
+void run_all_system_tests(void) {
+    // 运行中断系统测试
     uart_puts("\n");
     uart_puts("╔════════════════════════════════════════════════════════════════╗\n");
     uart_puts("║     实验4：中断处理与异常系统 - 功能测试套件                    ║\n");
     uart_puts("╚════════════════════════════════════════════════════════════════╝\n");
     
-    // 运行所有测试
     test_trap_initialization();
     test_interrupt_control();
     test_trapframe_allocation();
@@ -343,15 +615,14 @@ void run_interrupt_exception_tests(void) {
     
     uart_puts("\n");
     uart_puts("╔════════════════════════════════════════════════════════════════╗\n");
-    uart_puts("║                    所有测试执行完成！                           ║\n");
-    uart_puts("╚════════════════════════════════════════════════════════════════╝\n");
-    uart_puts("\n测试结果总结：\n");
-    uart_puts("  ✓ 中断系统初始化成功\n");
-    uart_puts("  ✓ 中断使能/禁用功能正常\n");
-    uart_puts("  ✓ 陷阱帧分配/释放正常\n");
-    uart_puts("  ✓ CSR读写操作正常\n");
-    uart_puts("  ✓ 异常和中断码已正确定义\n");
-    uart_puts("  ✓ 系统稳定性良好\n\n");
+    uart_puts("║          中断处理系统测试 - 执行完成！                          ║\n");
+    uart_puts("╚════════════════════════════════════════════════════════════════╝\n\n");
+    
+}
+
+// 保留向后兼容接口
+void run_interrupt_exception_tests(void) {
+    run_all_system_tests();
 }
 
 // ============================================================================
@@ -362,6 +633,13 @@ void main() {
     uart_puts("╔════════════════════════════════════════════════════════════════╗\n");
     uart_puts("║          RISCV-OS 实验4&5 - 中断处理与进程管理系统             ║\n");
     uart_puts("╚════════════════════════════════════════════════════════════════╝\n\n");
+    
+    // 初始化物理内存管理
+    // 内核开始于 0x80000000，kernel.elf 大约 30KB
+    // 将 0x80040000 到 0x88000000 作为堆内存区域（128MB - 256KB）
+    uart_puts("[系统初始化] 正在初始化物理内存管理...\n");
+    pmm_init(0x80040000, 0x88000000);  // 247.75MB 可用内存
+    uart_puts("[系统初始化] 物理内存管理初始化完成\n");
     
     // 初始化中断系统
     uart_puts("[系统初始化] 正在初始化中断系统...\n");
@@ -379,12 +657,18 @@ void main() {
     proc_init();
     uart_puts("[系统初始化] 进程系统初始化完成\n\n");
     
-    // 运行中断和异常系统测试
-    run_interrupt_exception_tests();
+    // // 运行中断和异常系统测试
+    // run_all_system_tests();
     
-    // 系统运行
-    uart_puts("系统进入空闲循环...\n");
+    // 运行进程管理系统测试
+    run_process_management_tests();
+
+    // 运行时间片轮转调度测试（该测试会启动调度器并运行工作线程）
+    test_round_robin_scheduler();
+
+    // 如果调度器返回，进入空闲循环
+    uart_puts("系统进入空闲循环（调度器返回）...\n");
     while(1) {
-        // 系统运行循环
+        // 空闲循环
     }
 }

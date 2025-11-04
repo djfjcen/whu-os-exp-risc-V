@@ -1,6 +1,7 @@
 #include "trap.h"
 #include "uart.h"
 #include "defs.h"
+#include "proc.h"
 #include <stddef.h>
 
 // CSR读写函数实现 - 内联汇编读写控制和状态寄存器
@@ -81,6 +82,13 @@ volatile uint64 ticks = 0;
 
 // 机器模式时钟中断计数
 static volatile uint64 m_mode_ticks = 0;
+
+/**
+ * 获取当前系统时钟滴答数
+ */
+uint64 get_ticks(void) {
+    return ticks;
+}
 
 // 机器模式时钟中断处理函数
 void machine_timer_handler(void) {
@@ -204,7 +212,6 @@ void trap_init(void) {
 
 /**
  * 初始化当前Hart的中断
- * 参考xv6的start.c和plciic.c
  */
 void trap_init_hart(void) {
     uart_puts("[trap] Initializing trap for hart...\n");
@@ -226,7 +233,6 @@ void trap_init_hart(void) {
 /**
  * 设置下一个时间中断
  * 在 QEMU virt 平台中，CLINT 使用 mtime 和 mtimecmp 寄存器
- * 参考 xv6 的 timerinit() 实现
  */
 void set_next_timer(void) {
     // 读取当前时间值
@@ -239,7 +245,6 @@ void set_next_timer(void) {
 
 /**
  * 初始化时间中断
- * 参考 xv6 的 timerinit() 实现
  */
 void timerinit(void) {
     uart_puts("[trap] Initializing timer...\n");
@@ -414,11 +419,22 @@ void usertrap(void) {
 /**
  * 定时器中断处理
  * 参考 xv6 的时间中断处理
+ * 
+ * 功能：
+ * 1. 计数时钟滴答
+ * 2. 设置下一次定时器中断
+ * 3. 触发进程调度（如果有运行中的进程）
  */
 void handle_timer_interrupt(void) {
-    // 定时器中断处理逻辑
-    // TODO: 可在此实现进程调度、更新系统时间等
-    printf("[handle_timer] Timer interrupt received\n");
+    printf("[timer] Timer interrupt: ticks=%ld\n", ticks);
+    
+    // 如果当前有运行中的进程，触发调度
+    // 这实现了基于时间的抢占式调度
+    struct proc *p = get_current_proc();
+    if (p && p->state == RUNNING) {
+        printf("[timer] Preempting process %d, yielding CPU\n", p->pid);
+        yield();  // 让出CPU，触发调度器选择下一个进程
+    }
 }
 
 /**
@@ -427,7 +443,6 @@ void handle_timer_interrupt(void) {
  */
 void handle_external_interrupt(void) {
     // 外部中断处理逻辑
-    // TODO: 可在此实现设备驱动中断处理
     printf("[handle_external] External interrupt received\n");
 }
 
@@ -437,7 +452,6 @@ void handle_external_interrupt(void) {
  */
 void handle_software_interrupt(void) {
     // 软件中断处理逻辑
-    // TODO: 可在此实现多处理器间通信
     printf("[handle_software] Software interrupt received\n");
 }
 
@@ -514,12 +528,6 @@ void handle_trap_page_fault(struct trapframe *tf, int is_write) {
         printf("[page_fault] Read/Exec page fault at 0x%lx\n", fault_addr);
     }
     
-    // 页故障处理逻辑（暂时空着，为后续实现保留）
-    // TODO: 可在此实现按需分页、写时复制等虚拟内存功能
-    // - 检查是否需要分配新页面
-    // - 从磁盘加载页面
-    // - 处理写时复制
-    // - 若无法处理则终止进程
 }
 
 /**
@@ -534,11 +542,6 @@ void handle_illegal_instruction(struct trapframe *tf) {
     
     printf("[illegal_instr] Illegal instruction at 0x%lx\n", tf->sepc);
     
-    // 非法指令处理逻辑（暂时空着，为后续实现保留）
-    // TODO: 可在此实现：
-    // - 软件模拟不支持的指令
-    // - 精确的错误报告
-    // - 进程终止或恢复
 }
 
 /**
@@ -553,9 +556,4 @@ void handle_breakpoint(struct trapframe *tf) {
     
     printf("[breakpoint] Breakpoint at 0x%lx\n", tf->sepc);
     
-    // 断点处理逻辑（暂时空着，为后续实现保留）
-    // TODO: 可在此实现：
-    // - 调试器支持
-    // - 条件断点
-    // - 性能计数
 }

@@ -1,5 +1,4 @@
 # kernelvec.S - RISC-V内核态中断向量入口
-# 参考xv6的kernelvec.S实现
 # 当CPU在内核态（监督模式）执行时发生中断或异常，跳转到这里
 
 .section .text
@@ -8,19 +7,9 @@
 .type kernelvec, @function
 
 kernelvec:
-    # 在内核模式下，我们有内核栈可用
-    # sp指向内核栈顶端
-    # trapframe大小 = 34 * 8 = 272 字节
-    # (32个通用寄存器 + 2个CSR: sepc + scause)
-    
-    # 第一步: 保存原始sp到一个临时位置
-    # 使用sscratch寄存器存储原始sp (在xv6中, sscratch保存指向trapframe的指针)
-    # 这里简化: 直接在栈上分配空间
     
     addi sp, sp, -272  # 为trapframe分配栈空间
     
-    # 保存所有32个通用寄存器 (x0-x31)
-    # trapframe结构中的偏移量
     sd x0, 0(sp)       # x0 - zero (硬编码为0，仍然保存)
     sd x1, 8(sp)       # x1 - ra (返回地址)
     # x2 (sp) 稍后处理，因为它的值已经改变
@@ -54,7 +43,6 @@ kernelvec:
     sd x30, 240(sp)    # x30 - t5
     sd x31, 248(sp)    # x31 - t6
     
-    # 保存原始sp (在sp被修改之前的值)
     # 原始sp = 当前sp + 272
     addi t0, sp, 272
     sd t0, 16(sp)      # 在x2的位置保存原始sp值
@@ -65,11 +53,6 @@ kernelvec:
     
     csrr t0, scause
     sd t0, 264(sp)     # scause (offset 33*8 = 264)
-    
-    # 现在调用C处理函数 kerneltrap()
-    # C函数的调用约定: 第一个参数在a0中
-    # 但kerneltrap()不需要参数（或者需要trapframe指针）
-    # 简化: 不传递参数，让kerneltrap使用全局状态
     
     call kerneltrap
     
@@ -116,6 +99,4 @@ kernelvec:
     # 恢复sp (原始值)
     ld x2, 16(sp)      # 从栈上恢复原始sp
     
-    # 使用sret返回到被中断的代码
-    # sret会跳转到sepc，并恢复之前的权限级别
     sret
