@@ -152,12 +152,15 @@ void test_simple_fork(void) {
             if (child->state == RUNNABLE) {
                 uart_puts("✓ 子进程状态为RUNNABLE\n");
             }
+            // 清理子进程
+            free_proc(child);
         }
     } else {
         uart_puts("✗ Fork失败\n");
     }
     
     free_proc(parent);
+    set_current_proc(0);  // 清除当前进程指针
     uart_puts("✓ 测试完成\n");
 }
 

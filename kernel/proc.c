@@ -34,6 +34,9 @@ struct proc *current_proc = 0;
 int nextpid = 1;
 struct cpu cpus[1];  // 简化：只支持单核
 
+// 抢占标志：当时间中断发生时，调度器应该进行进程切换
+volatile int need_resched = 0;
+
 // 自旋锁 (简化实现)
 typedef struct {
     int locked;
@@ -237,7 +240,7 @@ static int scheduler_initialized = 0;
  * 调度算法：轮转调度
  * - 遍历进程表，找到第一个RUNNABLE的进程
  * - 通过switch_context切换到该进程
- * - 当进程让出CPU时，恢复到scheduler继续循环
+ * - 当进程让出CPU或被时间中断抢占时，恢复到scheduler继续循环
  */
 void scheduler(void) {
     if (!scheduler_initialized) {
@@ -247,51 +250,47 @@ void scheduler(void) {
     
     struct proc *p;
     struct cpu *c = &cpus[0];  // 单核
-    c->proc = 0;
-    
-    intr_off();  // 关闭中断
-    
+    static int last_index = 0;
+
     for (;;) {
-        // 启用中断，允许设备中断
-        intr_on();
-        
-        // 查找可运行的进程，使用轮转算法
+        intr_on(); // 允许中断
+
+        // 从上一个停止的地方继续扫描，实现轮转
         int found = 0;
-        static int last_index = 0;
-        
         for (int i = 0; i < NPROC; i++) {
             int idx = (last_index + i) % NPROC;
             p = &proc[idx];
             
             if (p->state == RUNNABLE) {
-                // 切换到这个进程
                 p->state = RUNNING;
                 c->proc = p;
                 current_proc = p;
+                need_resched = 0;  // 清除抢占标志
                 
-                // 保存scheduler的当前上下文
-                // 切换到进程的上下文
                 printf("[proc] Scheduler: switching to process %d\n", p->pid);
                 
-                intr_off();  // 关闭中断以保护上下文切换
-                
-                // 上下文切换: scheduler_context -> p->context
-                // switch_context保存当前(scheduler)的context，恢复目标进程的context
+                intr_off();
                 switch_context(&scheduler_context, &p->context);
                 
-                // 进程通过yield()回到这里
-                // 继续循环找下一个RUNNABLE进程
+                // 当进程 yield() 或被时间中断抢占后回到这里...
+                // 进程完成了它的时间片或主动让出CPU
                 intr_on();
                 
+                c->proc = 0;
+                current_proc = 0;
+                
+                // 更新索引，确保下次从该进程的下一个进程开始
                 last_index = (idx + 1) % NPROC;
                 found = 1;
-                break;
+                break;  // 跳出for循环，回到for(;;)重新扫描
             }
         }
-        
+
+        // 如果一整轮扫描都没有找到 RUNNABLE 进程
         if (!found) {
-            // 没有可运行的进程
-            printf("[proc] No runnable process, ticks=%ld\n", get_ticks());
+            // 短暂让出CPU，避免忙轮询
+            // 在实际系统中可以使用 wfi() (等待中断)
+            // 这里简单等待，然后继续扫描
         }
     }
 }
@@ -304,12 +303,17 @@ void scheduler(void) {
  * 2. 标记当前进程为RUNNABLE
  * 3. 通过switch_context切换回scheduler
  * 4. scheduler会选择下一个进程运行
+ * 
+ * 注意：调用者应该确保在合适的中断状态下调用此函数
  */
 void yield(void) {
     struct proc *p = current_proc;
     if (!p) return;
     
-    intr_off();  // 关闭中断
+    // 保存当前的中断状态
+    int was_intr_on = intr_get();
+    
+    intr_off();  // 关闭中断以保护
     
     spin_lock(&proc_lock);
     if (p->state == RUNNING) {
@@ -325,7 +329,10 @@ void yield(void) {
     switch_context(&p->context, &scheduler_context);
     
     // 当这个进程再次被调度时，会从这里继续执行
-    intr_on();  // 重新启用中断
+    // 恢复到调用yield()时的中断状态
+    if (was_intr_on) {
+        intr_on();
+    }
 }
 
 /**

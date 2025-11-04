@@ -77,6 +77,7 @@ extern struct proc proc[NPROC];
 extern struct proc *current_proc;  // 当前运行的进程
 extern int nextpid;                // 下一个PID
 extern struct cpu cpus[];          // CPU数组
+extern volatile int need_resched;  // 抢占标志
 
 // 进程管理基本函数
 void proc_init(void);              // 初始化进程系统

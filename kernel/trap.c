@@ -423,18 +423,14 @@ void usertrap(void) {
  * 功能：
  * 1. 计数时钟滴答
  * 2. 设置下一次定时器中断
- * 3. 触发进程调度（如果有运行中的进程）
+ * 3. 设置抢占标志（不直接调用yield()避免嵌套调用问题）
  */
 void handle_timer_interrupt(void) {
     printf("[timer] Timer interrupt: ticks=%ld\n", ticks);
     
-    // 如果当前有运行中的进程，触发调度
-    // 这实现了基于时间的抢占式调度
-    struct proc *p = get_current_proc();
-    if (p && p->state == RUNNING) {
-        printf("[timer] Preempting process %d, yielding CPU\n", p->pid);
-        yield();  // 让出CPU，触发调度器选择下一个进程
-    }
+    // 设置抢占标志，让调度器在适当时候进行进程切换
+    extern volatile int need_resched;
+    need_resched = 1;
 }
 
 /**
