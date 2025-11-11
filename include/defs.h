@@ -48,12 +48,21 @@ void dump_pagetable(pagetable_t pt, int level);
 void kvminit(void);
 void kvminithart(void);
 
-// 用户-内核内存拷贝函数 (xv6-style)
-int copyout(pagetable_t, uint64_t, char*, uint64_t);
-int copyin(pagetable_t, char*, uint64_t, uint64_t);
-int copyinstr(pagetable_t, char*, uint64_t, uint64_t);
-int either_copyout(int user_dst, uint64_t dst, void *src, uint64_t len);
-int either_copyin(void *dst, int user_src, uint64_t src, uint64_t len);
+// 用户进程页表管理函数声明
+struct proc;  // 前向声明
+pagetable_t proc_pagetable(struct proc* p);
+void proc_freepagetable(pagetable_t pagetable, uint64_t sz);
+uint64_t uvmalloc(pagetable_t pagetable, uint64_t oldsz, uint64_t newsz);
+uint64_t uvmdealloc(pagetable_t pagetable, uint64_t oldsz, uint64_t newsz);
+void uvmunmap(pagetable_t pagetable, uint64_t va, uint64_t npages, int do_free);
+void uvmfree(pagetable_t pagetable, uint64_t sz);
+int uvmcopy(pagetable_t old, pagetable_t new, uint64_t sz);
+void freewalk(pagetable_t pagetable);
+uint64_t walkaddr(pagetable_t pagetable, uint64_t va);
+int copyin(pagetable_t pagetable, char* dst, uint64_t srcva, uint64_t len);
+int copyout(pagetable_t pagetable, uint64_t dstva, char* src, uint64_t len);
+int copyinstr(pagetable_t pagetable, char* dst, uint64_t srcva, uint64_t max);
+
 
 // 字符串函数
 int strlen(const char*);

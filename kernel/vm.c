@@ -1,5 +1,6 @@
 #include <stdint.h>
 #include "uart.h"
+#include "proc.h"
 
 // 页表项相关定义
 typedef uint64_t pte_t;
@@ -14,6 +15,9 @@ typedef uint64_t* pagetable_t;
 #define PTE_G (1L << 5)  // 全局位
 #define PTE_A (1L << 6)  // 访问位
 #define PTE_D (1L << 7)  // 脏位
+
+// 从PTE提取标志位
+#define PTE_FLAGS(pte) ((pte) & 0x3FF)
 
 // 页表相关常量
 #define PAGE_SIZE 4096
@@ -33,10 +37,6 @@ typedef uint64_t* pagetable_t;
 
 #define PTE2PA(pte) (((pte) >> 10) << 12)  // 页表项到物理地址
 #define PA2PTE(pa) (((pa) >> 12) << 10)    // 物理地址到页表项
-
-// 虚拟地址和物理地址对齐检查
-#define PGROUNDUP(sz) (((sz) + PAGE_SIZE - 1) & ~(PAGE_SIZE - 1))
-#define PGROUNDDOWN(a) (((a)) & ~(PAGE_SIZE - 1))
 
 // 内核内存布局相关定义
 #define KERNBASE 0x80000000L           // 内核基地址
@@ -889,104 +889,305 @@ void test_page_replacement(void) {
     uart_puts("Page replacement test completed.\n");
 }
 
-// Copy from kernel to user.
-// Copy len bytes from src to virtual address dstva in a given page table.
-// Return 0 on success, -1 on error.
-int
-copyout(pagetable_t pagetable, uint64_t dstva, char *src, uint64_t len)
-{
-  uint64_t n, va0, pa0;
+// ==================== 用户进程页表管理 ====================
 
-  while(len > 0){
-    va0 = PGROUNDDOWN(dstva);
-    // TODO: 完整实现需要通过页表转换虚拟地址到物理地址
-    // 这里是简化版本，假设直接映射
-    pa0 = dstva;
-    
-    n = PAGE_SIZE - (dstva - va0);
-    if(n > len)
-      n = len;
-    
-    // 直接内存拷贝（简化实现）
-    char *dst = (char*)dstva;
-    for(uint64_t i = 0; i < n; i++)
-      dst[i] = src[i];
-
-    len -= n;
-    src += n;
-    dstva = va0 + PAGE_SIZE;
-  }
-  return 0;
-}
-
-// Copy from user to kernel.
-// Copy len bytes to dst from virtual address srcva in a given page table.
-// Return 0 on success, -1 on error.
-int
-copyin(pagetable_t pagetable, char *dst, uint64_t srcva, uint64_t len)
-{
-  uint64_t n, va0, pa0;
-
-  while(len > 0){
-    va0 = PGROUNDDOWN(srcva);
-    // TODO: 完整实现需要通过页表转换
-    pa0 = srcva;
-    
-    n = PAGE_SIZE - (srcva - va0);
-    if(n > len)
-      n = len;
-    
-    // 直接内存拷贝（简化实现）
-    char *src = (char*)srcva;
-    for(uint64_t i = 0; i < n; i++)
-      dst[i] = src[i];
-
-    len -= n;
-    dst += n;
-    srcva = va0 + PAGE_SIZE;
-  }
-  return 0;
-}
-
-// Copy a null-terminated string from user to kernel.
-// Copy bytes to dst from virtual address srcva in a given page table,
-// until a '\0', or max.
-// Return 0 on success, -1 on error.
-int
-copyinstr(pagetable_t pagetable, char *dst, uint64_t srcva, uint64_t max)
-{
-  uint64_t n, va0, pa0;
-  int got_null = 0;
-
-  while(got_null == 0 && max > 0){
-    va0 = PGROUNDDOWN(srcva);
-    // TODO: 完整实现需要通过页表转换
-    pa0 = srcva;
-    
-    n = PAGE_SIZE - (srcva - va0);
-    if(n > max)
-      n = max;
-
-    char *src = (char*)srcva;
-    while(n > 0){
-      if(*src == '\0'){
-        *dst = '\0';
-        got_null = 1;
-        break;
-      } else {
-        *dst = *src;
-      }
-      --n;
-      --max;
-      src++;
-      dst++;
+// 从虚拟地址获取物理地址（不带页面替换）
+uint64_t walkaddr(pagetable_t pagetable, uint64_t va) {
+    if (va >= (1L << 39)) {
+        return 0;
     }
+    
+    pte_t* pte = walk_lookup(pagetable, va);
+    if (pte == 0 || (*pte & PTE_V) == 0) {
+        return 0;
+    }
+    if ((*pte & PTE_U) == 0) {
+        return 0;
+    }
+    
+    uint64_t pa = PTE2PA(*pte);
+    return pa;
+}
 
-    srcva = va0 + PAGE_SIZE;
-  }
-  if(got_null){
+// 复制用户内存到内核
+// 从用户页表pagetable的srcva地址复制len字节到内核的dst
+int copyin(pagetable_t pagetable, char* dst, uint64_t srcva, uint64_t len) {
+    uint64_t n, va0, pa0;
+    
+    while (len > 0) {
+        va0 = PGROUNDDOWN(srcva);
+        pa0 = walkaddr(pagetable, va0);
+        if (pa0 == 0) {
+            return -1;
+        }
+        
+        n = PAGE_SIZE - (srcva - va0);
+        if (n > len) {
+            n = len;
+        }
+        
+        // 简单的内存复制
+        char* src = (char*)(pa0 + (srcva - va0));
+        for (uint64_t i = 0; i < n; i++) {
+            dst[i] = src[i];
+        }
+        
+        len -= n;
+        dst += n;
+        srcva = va0 + PAGE_SIZE;
+    }
+    
     return 0;
-  } else {
+}
+
+// 复制内核内存到用户
+// 从内核的src复制len字节到用户页表pagetable的dstva地址
+int copyout(pagetable_t pagetable, uint64_t dstva, char* src, uint64_t len) {
+    uint64_t n, va0, pa0;
+    
+    while (len > 0) {
+        va0 = PGROUNDDOWN(dstva);
+        pa0 = walkaddr(pagetable, va0);
+        if (pa0 == 0) {
+            return -1;
+        }
+        
+        n = PAGE_SIZE - (dstva - va0);
+        if (n > len) {
+            n = len;
+        }
+        
+        // 简单的内存复制
+        char* dst = (char*)(pa0 + (dstva - va0));
+        for (uint64_t i = 0; i < n; i++) {
+            dst[i] = src[i];
+        }
+        
+        len -= n;
+        src += n;
+        dstva = va0 + PAGE_SIZE;
+    }
+    
+    return 0;
+}
+
+// 取消用户页表的映射，释放对应物理页
+// 从va开始，取消npages个页面的映射
+// do_free为1时释放物理页
+void uvmunmap(pagetable_t pagetable, uint64_t va, uint64_t npages, int do_free) {
+    if ((va % PAGE_SIZE) != 0) {
+        return;  // va must be page-aligned
+    }
+    
+    for (uint64_t a = va; a < va + npages * PAGE_SIZE; a += PAGE_SIZE) {
+        pte_t* pte = walk_lookup(pagetable, a);
+        if (pte == 0) {
+            continue;
+        }
+        if ((*pte & PTE_V) == 0) {
+            continue;
+        }
+        if (PTE2PA(*pte) == 0) {
+            continue;
+        }
+        
+        if (do_free) {
+            uint64_t pa = PTE2PA(*pte);
+            free_page((void*)pa);
+        }
+        
+        *pte = 0;
+    }
+}
+
+// 释放用户内存：从oldsz缩减到newsz
+// 返回新的大小
+uint64_t uvmdealloc(pagetable_t pagetable, uint64_t oldsz, uint64_t newsz) {
+    if (newsz >= oldsz) {
+        return oldsz;
+    }
+    
+    if (PGROUNDUP(newsz) < PGROUNDUP(oldsz)) {
+        int npages = (PGROUNDUP(oldsz) - PGROUNDUP(newsz)) / PAGE_SIZE;
+        uvmunmap(pagetable, PGROUNDUP(newsz), npages, 1);
+    }
+    
+    return newsz;
+}
+
+// 分配用户内存：从oldsz增长到newsz
+// 返回新的大小，失败返回0
+uint64_t uvmalloc(pagetable_t pagetable, uint64_t oldsz, uint64_t newsz) {
+    if (newsz < oldsz) {
+        return oldsz;
+    }
+    
+    oldsz = PGROUNDUP(oldsz);
+    
+    for (uint64_t a = oldsz; a < newsz; a += PAGE_SIZE) {
+        void* mem = alloc_page();
+        if (mem == 0) {
+            uvmdealloc(pagetable, a, oldsz);
+            return 0;
+        }
+        
+        // 清零新分配的页面
+        char* p = (char*)mem;
+        for (int i = 0; i < PAGE_SIZE; i++) {
+            p[i] = 0;
+        }
+        
+        if (map_page(pagetable, a, (uint64_t)mem, PTE_W | PTE_R | PTE_X | PTE_U) != 0) {
+            free_page(mem);
+            uvmdealloc(pagetable, a, oldsz);
+            return 0;
+        }
+    }
+    
+    return newsz;
+}
+
+// 释放用户页表中的所有页面（递归）
+void freewalk(pagetable_t pagetable) {
+    // 遍历所有512个PTE
+    for (int i = 0; i < 512; i++) {
+        pte_t pte = pagetable[i];
+        if ((pte & PTE_V) && (pte & (PTE_R | PTE_W | PTE_X)) == 0) {
+            // 这个PTE指向下一级页表
+            uint64_t child = PTE2PA(pte);
+            freewalk((pagetable_t)child);
+            pagetable[i] = 0;
+        } else if (pte & PTE_V) {
+            // 忽略已映射的叶子页面
+        }
+    }
+    free_page((void*)pagetable);
+}
+
+// 释放用户内存页面，但不释放页表页
+void uvmfree(pagetable_t pagetable, uint64_t sz) {
+    if (sz > 0) {
+        uvmunmap(pagetable, 0, PGROUNDUP(sz) / PAGE_SIZE, 1);
+    }
+}
+
+// 为新进程创建用户页表
+// 简化版本：暂时不映射trapframe到用户空间
+// trapframe在内核空间管理
+pagetable_t proc_pagetable(struct proc* p) {
+    pagetable_t pagetable;
+    
+    if (!p) {
+        uart_puts("[vm] proc_pagetable: null proc\n");
+        return 0;
+    }
+    
+    // 创建空的页表
+    pagetable = create_pagetable();
+    if (pagetable == 0) {
+        uart_puts("[vm] proc_pagetable: failed to create pagetable\n");
+        return 0;
+    }
+    
+    // 注意：trapframe保留在内核空间，不映射到用户空间
+    // 在真实的xv6中，trapframe会映射到用户空间以便快速访问
+    // 这里简化处理，trapframe只在内核中访问
+    
+    return pagetable;
+}
+
+// 释放进程的用户页表
+void proc_freepagetable(pagetable_t pagetable, uint64_t sz) {
+    // 释放用户内存页面
+    if (sz > 0) {
+        uvmunmap(pagetable, 0, PGROUNDUP(sz) / PAGE_SIZE, 1);
+    }
+    
+    // 释放页表本身
+    freewalk(pagetable);
+}
+
+// 复制父进程的用户内存到子进程
+int uvmcopy(pagetable_t old, pagetable_t new, uint64_t sz) {
+    pte_t* pte;
+    uint64_t pa, i;
+    uint64_t flags;
+    char* mem;
+    
+    for (i = 0; i < sz; i += PAGE_SIZE) {
+        if ((pte = walk_lookup(old, i)) == 0) {
+            goto err;
+        }
+        if ((*pte & PTE_V) == 0) {
+            goto err;
+        }
+        
+        pa = PTE2PA(*pte);
+        flags = PTE_FLAGS(*pte);
+        
+        if ((mem = (char*)alloc_page()) == 0) {
+            goto err;
+        }
+        
+        // 复制页面内容
+        char* src = (char*)pa;
+        for (int j = 0; j < PAGE_SIZE; j++) {
+            mem[j] = src[j];
+        }
+        
+        if (map_page(new, i, (uint64_t)mem, flags) != 0) {
+            free_page(mem);
+            goto err;
+        }
+    }
+    
+    return 0;
+
+err:
+    uvmunmap(new, 0, i / PAGE_SIZE, 1);
     return -1;
-  }
+}
+
+// 复制以null结尾的字符串从用户到内核
+// 从用户页表pagetable的srcva地址复制字符串到内核的dst，最多复制max字节
+// 返回0成功，-1失败
+int copyinstr(pagetable_t pagetable, char* dst, uint64_t srcva, uint64_t max) {
+    uint64_t n, va0, pa0;
+    int got_null = 0;
+    
+    while (got_null == 0 && max > 0) {
+        va0 = PGROUNDDOWN(srcva);
+        pa0 = walkaddr(pagetable, va0);
+        if (pa0 == 0) {
+            return -1;
+        }
+        
+        n = PAGE_SIZE - (srcva - va0);
+        if (n > max) {
+            n = max;
+        }
+        
+        char* src = (char*)(pa0 + (srcva - va0));
+        while (n > 0) {
+            if (*src == '\0') {
+                *dst = '\0';
+                got_null = 1;
+                break;
+            } else {
+                *dst = *src;
+            }
+            --n;
+            --max;
+            src++;
+            dst++;
+        }
+        
+        srcva = va0 + PAGE_SIZE;
+    }
+    
+    if (got_null) {
+        return 0;
+    } else {
+        return -1;
+    }
 }

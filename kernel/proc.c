@@ -119,6 +119,7 @@ struct proc* alloc_proc(void) {
             p->state = USED;
             p->pid = nextpid++;
             p->ppid = 0;
+            p->uid = 0;              // 默认为root用户(uid=0)
             p->killed = 0;
             p->xstate = 0;
             
@@ -142,6 +143,22 @@ struct proc* alloc_proc(void) {
             // 初始化上下文
             memset(&p->context, 0, sizeof(p->context));
             p->context.sp = (uint64)p->kstack + PAGE_SIZE;  // 栈顶
+            
+            // 创建用户页表
+            p->pagetable = proc_pagetable(p);
+            if (p->pagetable == 0) {
+                uart_puts("[proc] Failed to create user pagetable\n");
+                free_trapframe(p->trapframe);
+                free_page(p->kstack);
+                p->trapframe = 0;
+                p->kstack = 0;
+                p->state = UNUSED;
+                spin_unlock(&proc_lock);
+                return 0;
+            }
+            
+            // 初始化进程大小
+            p->sz = 0;
             
             printf("[proc] Allocated process: pid=%d\n", p->pid);
             
@@ -174,10 +191,11 @@ void free_proc(struct proc *p) {
     }
     
     if (p->pagetable) {
-        destroy_pagetable(p->pagetable);
+        proc_freepagetable(p->pagetable, p->sz);
         p->pagetable = 0;
     }
     
+    p->sz = 0;
     p->state = UNUSED;
     p->pid = 0;
     
@@ -264,6 +282,72 @@ struct proc* myproc(void) {
  */
 void set_current_proc(struct proc *p) {
     current_proc = p;
+}
+
+/**
+ * 获取当前进程的UID
+ */
+int get_uid(void) {
+    if (current_proc) {
+        return current_proc->uid;
+    }
+    return 0;  // 默认返回root
+}
+
+/**
+ * 设置当前进程的UID（需要权限检查）
+ */
+int set_uid(int uid) {
+    if (!current_proc) {
+        return -1;
+    }
+    
+    // 简化版：只有root(uid=0)可以修改UID
+    if (current_proc->uid != 0) {
+        printf("[proc] Permission denied: only root can change UID\n");
+        return -1;
+    }
+    
+    if (uid < 0 || uid >= NUSER) {
+        printf("[proc] Invalid UID: %d (must be 0-%d)\n", uid, NUSER-1);
+        return -1;
+    }
+    
+    current_proc->uid = uid;
+    printf("[proc] Changed UID to %d for process %d\n", uid, current_proc->pid);
+    return 0;
+}
+
+/**
+ * 统计指定用户的进程数
+ */
+int count_user_procs(int uid) {
+    int count = 0;
+    
+    for (int i = 0; i < NPROC; i++) {
+        acquire(&proc[i].lock);
+        if (proc[i].state != UNUSED && proc[i].uid == uid) {
+            count++;
+        }
+        release(&proc[i].lock);
+    }
+    
+    return count;
+}
+
+/**
+ * 检查用户是否可以fork（是否达到进程数上限）
+ */
+int can_fork(int uid) {
+    int count = count_user_procs(uid);
+    
+    if (count >= MAX_PROC_PER_USER) {
+        printf("[proc] Fork denied: user %d has %d processes (max %d)\n", 
+               uid, count, MAX_PROC_PER_USER);
+        return 0;
+    }
+    
+    return 1;
 }
 
 // 内存管理辅助函数（简化实现）
@@ -403,6 +487,11 @@ int fork(void) {
         return -1;
     }
     
+    // 检查用户进程数限制
+    if (!can_fork(p->uid)) {
+        return -1;  // 已打印错误消息
+    }
+    
     // 分配新进程
     struct proc *np = alloc_proc();
     if (!np) {
@@ -410,18 +499,21 @@ int fork(void) {
         return -1;
     }
     
+    // 继承父进程的UID
+    np->uid = p->uid;
+    
     // 设置父子关系
     np->parent = p;
     np->ppid = p->pid;
     
-    // 简化：复制页表（实际应该使用写时复制）
-    if (p->pagetable) {
-        np->pagetable = create_pagetable();
-        if (!np->pagetable) {
+    // 复制父进程的内存到子进程
+    np->sz = p->sz;
+    if (p->sz > 0 && p->pagetable && np->pagetable) {
+        if (uvmcopy(p->pagetable, np->pagetable, p->sz) < 0) {
+            uart_puts("[proc] fork: failed to copy memory\n");
             free_proc(np);
             return -1;
         }
-        // TODO: 复制内存内容
     }
     
     // 复制陷阱帧（用于返回值）
@@ -434,7 +526,8 @@ int fork(void) {
     // 标记为可运行
     np->state = RUNNABLE;
     
-    printf("[proc] fork: created process %d (parent %d)\n", np->pid, p->pid);
+    printf("[proc] fork: created process %d (parent %d, uid %d)\n", 
+           np->pid, p->pid, np->uid);
     
     // 父进程返回子进程PID
     return np->pid;

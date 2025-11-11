@@ -8,6 +8,10 @@
 // 进程最大数量
 #define NPROC 16
 
+// 用户相关限制
+#define NUSER 8              // 最大用户数
+#define MAX_PROC_PER_USER 4  // 每个用户最多进程数
+
 // 自旋锁结构（放在进程结构之前定义）
 struct spinlock {
     int locked;              // 是否已被锁定
@@ -51,6 +55,7 @@ struct proc {
     enum procstate state;    // 进程状态
     int pid;                 // 进程ID
     int ppid;                // 父进程ID
+    int uid;                 // 用户ID (新增)
     char name[16];           // 进程名称
     int xstate;              // 退出状态
     int killed;              // 是否被kill标记
@@ -115,8 +120,15 @@ void sleep(void *chan, struct spinlock *lk);  // 睡眠
 void wakeup(void *chan);           // 唤醒
 
 // 其他辅助函数
+// 其他辅助函数
 struct proc* myproc(void);         // 获取当前进程
 int growproc(int n);               // 增长或收缩进程内存
 void reparent(struct proc *p);     // 重新设置父进程
+
+// UID 相关函数
+int get_uid(void);                 // 获取当前进程UID
+int set_uid(int uid);              // 设置当前进程UID
+int count_user_procs(int uid);     // 统计指定用户的进程数
+int can_fork(int uid);             // 检查用户是否可以fork
 
 #endif // _PROC_H
