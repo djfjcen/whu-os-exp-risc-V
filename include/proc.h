@@ -8,6 +8,11 @@
 // 进程最大数量
 #define NPROC 16
 
+// 自旋锁结构（放在进程结构之前定义）
+struct spinlock {
+    int locked;              // 是否已被锁定
+};
+
 // 进程状态定义
 enum procstate {
     UNUSED,      // 未使用
@@ -39,10 +44,14 @@ struct context {
 
 // 进程结构体定义
 struct proc {
+    // 同步
+    struct spinlock lock;    // 保护进程状态的锁
+    
     // 进程基本信息
     enum procstate state;    // 进程状态
     int pid;                 // 进程ID
     int ppid;                // 父进程ID
+    char name[16];           // 进程名称
     int xstate;              // 退出状态
     int killed;              // 是否被kill标记
     
@@ -69,7 +78,9 @@ struct proc {
 // CPU状态结构 (简化版本)
 struct cpu {
     struct proc *proc;       // 当前运行的进程
-    struct context *scheduler_context;  // 调度器上下文
+    struct context context;  // 调度器上下文（修改：使用context而不是指针）
+    int noff;                // 嵌套锁深度
+    int intena;              // 中断使能状态
 };
 
 // 进程管理全局变量声明
@@ -98,18 +109,14 @@ void switch_context(struct context *old, struct context *new);  // 上下文切�
 
 // 进程生命周期管理
 int fork(void);                    // 创建子进程
-void exit(int status);             // 进程退出
-int wait(int *status);             // 等待子进程
-void kill(int pid);                // 杀死进程
+void exit(int status);             // 退出进程
+int wait(int *status);             // 等待子进程（修改为int*参数）
+void sleep(void *chan, struct spinlock *lk);  // 睡眠
+void wakeup(void *chan);           // 唤醒
 
-// 进程工具函数
-int get_pid(void);                 // 获取当前进程PID
-struct proc* get_current_proc(void);  // 获取当前进程结构
-void set_current_proc(struct proc *p);  // 设置当前进程
+// 其他辅助函数
+struct proc* myproc(void);         // 获取当前进程
+int growproc(int n);               // 增长或收缩进程内存
+void reparent(struct proc *p);     // 重新设置父进程
 
-// 进程睡眠/唤醒
-void sleep(void *chan);            // 睡眠直到被唤醒
-void wakeup(void *chan);           // 唤醒所有睡眠在通道上的进程
-void wakeup_one(void *chan);       // 唤醒一个睡眠在通道上的进程
-
-#endif
+#endif // _PROC_H

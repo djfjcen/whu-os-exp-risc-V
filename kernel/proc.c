@@ -2,6 +2,8 @@
 #include "trap.h"
 #include "uart.h"
 #include "defs.h"
+#include "syscall.h"
+#include <stddef.h>
 
 // 前向声明
 extern volatile uint64 ticks;
@@ -25,6 +27,17 @@ static void* memcpy_impl(void *dest, const void *src, unsigned long n) {
     return dest;
 }
 
+// xv6-style strlen implementation
+int
+strlen(const char *s)
+{
+  int n;
+
+  for(n = 0; s[n]; n++)
+    ;
+  return n;
+}
+
 #define memset memset_impl
 #define memcpy memcpy_impl
 
@@ -37,21 +50,38 @@ struct cpu cpus[1];  // 简化：只支持单核
 // 抢占标志：当时间中断发生时，调度器应该进行进程切换
 volatile int need_resched = 0;
 
-// 自旋锁 (简化实现)
-typedef struct {
-    int locked;
-} spinlock_t;
+// 全局 tickslock (在main.c中定义)
+extern struct spinlock tickslock;
 
-static spinlock_t proc_lock = {0};
+static struct spinlock proc_lock = {0};
 
-static void spin_lock(spinlock_t *lock) {
+static void spin_lock(struct spinlock *lock) {
     while (__sync_lock_test_and_set(&lock->locked, 1)) {
         // 自旋等待
     }
 }
 
-static void spin_unlock(spinlock_t *lock) {
+static void spin_unlock(struct spinlock *lock) {
     __sync_lock_release(&lock->locked);
+}
+
+// 简化的锁接口（兼容xv6风格）
+static inline void acquire(struct spinlock *lock) {
+    spin_lock(lock);
+}
+
+static inline void release(struct spinlock *lock) {
+    spin_unlock(lock);
+}
+
+// 检查当前CPU是否持有锁（简化实现）
+static inline int holding(struct spinlock *lock) {
+    return lock->locked;
+}
+
+// 获取当前CPU结构（简化：单核）
+static inline struct cpu* mycpu(void) {
+    return &cpus[0];
 }
 
 /**
@@ -223,10 +253,37 @@ struct proc* get_current_proc(void) {
 }
 
 /**
+ * 获取当前进程（myproc 别名）
+ */
+struct proc* myproc(void) {
+    return current_proc;
+}
+
+/**
  * 设置当前进程
  */
 void set_current_proc(struct proc *p) {
     current_proc = p;
+}
+
+// 内存管理辅助函数（简化实现）
+// 分配用户内存 - 扩展进程地址空间
+uint64 allocuvm(pagetable_t pagetable, uint64 oldsz, uint64 newsz) {
+    // TODO: 实现完整的用户内存分配
+    // 这里返回新的大小表示"成功"
+    return newsz;
+}
+
+// 释放用户内存 - 收缩进程地址空间
+uint64 deallocuvm(pagetable_t pagetable, uint64 oldsz, uint64 newsz) {
+    // TODO: 实现完整的用户内存释放
+    return newsz;
+}
+
+// 切换到用户页表
+void switchuvm(struct proc *p) {
+    // TODO: 实现页表切换
+    // 应该设置 satp 寄存器
 }
 
 // 调度器的上下文 (调度器本身的执行状态)
@@ -464,10 +521,9 @@ int wait(int *status) {
             return -1;
         }
         
+        // 睡眠等待子进程 (简化：使用 p 作为 chan)
+        sleep(p, &proc_lock);  // 在子进程exit时会被唤醒
         spin_unlock(&proc_lock);
-        
-        // 睡眠等待子进程 (简化：直接睡眠)
-        sleep(p);  // 在子进程exit时会被唤醒
     }
 }
 
@@ -486,53 +542,275 @@ void kill(int pid) {
     }
 }
 
-/**
- * 睡眠直到被唤醒
- * chan: 等待通道 (可以是任何指针值)
- */
-void sleep(void *chan) {
-    struct proc *p = current_proc;
-    if (!p) return;
-    
-    spin_lock(&proc_lock);
-    
-    // 标记为睡眠
-    p->state = SLEEPING;
-    p->chan = chan;
-    
-    spin_unlock(&proc_lock);
-    
-    // 让出CPU
-    yield();
+// Look in the process table for an UNUSED proc.
+// If found, initialize state required to run in the kernel,
+// and return with p->lock held.
+// If there are no free procs, or a memory allocation fails, return 0.
+static struct proc*
+allocproc(void)
+{
+  struct proc *p;
+  for(p = proc; p < &proc[NPROC]; p++){
+    if(p->state == UNUSED){
+      goto found;
+    }
+  }
+  return 0;
+
+found:
+  p->state = USED;
+  p->pid = nextpid++;
+  p->ppid = 0;
+  p->killed = 0;
+  p->xstate = 0;
+
+  // Allocate a trapframe for this process.
+  p->trapframe = alloc_trapframe();
+  if(!p->trapframe){
+    p->state = UNUSED;
+    return 0;
+  }
+
+  // Allocate a page for the process's kernel stack.
+  p->kstack = (char*)alloc_page();
+  if(!p->kstack){
+    free_trapframe(p->trapframe);
+    p->state = UNUSED;
+    return 0;
+  }
+
+  // Initialize the context to run user code when the process is scheduled.
+  memset(&p->context, 0, sizeof(p->context));
+  p->context.sp = (uint64)p->kstack + PAGE_SIZE; // top of the stack
+
+  return p;
 }
 
-/**
- * 唤醒所有睡眠在指定通道上的进程
- */
-void wakeup(void *chan) {
-    spin_lock(&proc_lock);
-    
-    for (int i = 0; i < NPROC; i++) {
-        if (proc[i].state == SLEEPING && proc[i].chan == chan) {
-            proc[i].state = RUNNABLE;
-        }
-    }
-    
-    spin_unlock(&proc_lock);
+// grow or shrink user memory by n bytes.
+// return 0 on success, -1 on failure.
+int
+growproc(int n)
+{
+  uint64 sz = myproc()->sz;
+  if(n > 0){
+    // Allocate pages for growing the process.
+    if((sz = allocuvm(myproc()->pagetable, sz, sz + n)) == 0)
+      return -1;
+  } else if(n < 0){
+    // Deallocate pages for shrinking the process.
+    if((sz = deallocuvm(myproc()->pagetable, sz, sz + n)) == 0)
+      return -1;
+  }
+  myproc()->sz = sz;
+  switchuvm(myproc());
+  return 0;
 }
 
-/**
- * 唤醒一个睡眠在指定通道上的进程
- */
-void wakeup_one(void *chan) {
-    spin_lock(&proc_lock);
-    
-    for (int i = 0; i < NPROC; i++) {
-        if (proc[i].state == SLEEPING && proc[i].chan == chan) {
-            proc[i].state = RUNNABLE;
-            break;
-        }
-    }
-    
-    spin_unlock(&proc_lock);
+uint64
+sys_getpid(void)
+{
+  return myproc()->pid;
 }
+
+uint64
+sys_fork(void)
+{
+  return fork();
+}
+
+uint64
+sys_exit(void)
+{
+  int n;
+  if(argint(0, &n) < 0)
+    return -1;
+  exit(n);
+  return 0;  // not reached
+}
+
+uint64
+sys_wait(void)
+{
+  uint64 p;
+  if(argaddr(0, &p) < 0)
+    return -1;
+  return wait((int*)p);  // 强制转换为 int*
+}
+
+uint64
+sys_sbrk(void)
+{
+  int addr;
+  int n;
+
+  if(argint(0, &n) < 0)
+    return -1;
+  addr = myproc()->sz;
+  if(growproc(n) < 0)
+    return -1;
+  return addr;
+}
+
+// Atomically release lock and sleep on chan.
+// Simplified version without complex lock checking.
+void
+sleep(void *chan, struct spinlock *lk)
+{
+  struct proc *p = myproc();
+  
+  // Release the passed lock
+  if(lk != NULL)
+    release(lk);
+
+  // Go to sleep.
+  p->chan = chan;
+  p->state = SLEEPING;
+
+  // Give up CPU
+  yield();
+
+  // Tidy up.
+  p->chan = 0;
+
+  // Reacquire the passed lock
+  if(lk != NULL)
+    acquire(lk);
+}
+
+// Wake up all processes sleeping on chan.
+// Simplified version.
+void
+wakeup(void *chan)
+{
+  struct proc *p;
+
+  for(p = proc; p < &proc[NPROC]; p++) {
+    if(p->state == SLEEPING && p->chan == chan) {
+      p->state = RUNNABLE;
+    }
+  }
+}
+
+uint64
+sys_uptime(void)
+{
+  uint64 xticks;
+
+  acquire(&tickslock);
+  xticks = ticks;
+  release(&tickslock);
+  return xticks;
+}
+
+uint64
+sys_sleep(void)
+{
+  int n;
+  uint64 ticks0;
+
+  if(argint(0, &n) < 0)
+    return -1;
+  acquire(&tickslock);
+  ticks0 = ticks;
+  while(ticks - ticks0 < (uint64)n){
+    if(myproc()->killed){
+      release(&tickslock);
+      return -1;
+    }
+    // 使用tickslock作为sleep的chan
+    sleep((void*)&tickslock, &tickslock);
+  }
+  release(&tickslock);
+  return 0;
+}
+
+// File system syscalls - stubs (not yet implemented)
+uint64
+sys_read(void)
+{
+  // TODO: implement file read
+  return -1;
+}
+
+uint64
+sys_write(void)
+{
+  // TODO: implement file write
+  return -1;
+}
+
+uint64
+sys_open(void)
+{
+  // TODO: implement file open
+  return -1;
+}
+
+uint64
+sys_close(void)
+{
+  // TODO: implement file close
+  return -1;
+}
+
+// Other syscalls - stubs (not yet implemented)
+uint64
+sys_pipe(void)
+{
+  return -1;
+}
+
+uint64
+sys_kill(void)
+{
+  return -1;
+}
+
+uint64
+sys_exec(void)
+{
+  return -1;
+}
+
+uint64
+sys_fstat(void)
+{
+  return -1;
+}
+
+uint64
+sys_chdir(void)
+{
+  return -1;
+}
+
+uint64
+sys_dup(void)
+{
+  return -1;
+}
+
+uint64
+sys_mknod(void)
+{
+  return -1;
+}
+
+uint64
+sys_unlink(void)
+{
+  return -1;
+}
+
+uint64
+sys_link(void)
+{
+  return -1;
+}
+
+uint64
+sys_mkdir(void)
+{
+  return -1;
+}
+

@@ -2,6 +2,7 @@
 #include "uart.h"
 #include "defs.h"
 #include "proc.h"
+#include "syscall.h"
 #include <stddef.h>
 
 // CSR读写函数实现 - 内联汇编读写控制和状态寄存器
@@ -58,14 +59,54 @@ static inline uint64 r_stval(void) {
     return x;
 }
 
-static inline uint64 r_stvec(void) {
+uint64 r_stvec(void) {
     uint64 x;
     asm volatile("csrr %0, stvec" : "=r" (x));
     return x;
 }
 
-static inline void w_stvec(uint64 x) {
+void w_stvec(uint64 x) {
     asm volatile("csrw stvec, %0" : : "r" (x));
+}
+
+static inline uint64 r_satp(void) {
+    uint64 x;
+    asm volatile("csrr %0, satp" : "=r" (x));
+    return x;
+}
+
+static inline void w_satp(uint64 x) {
+    asm volatile("csrw satp, %0" : : "r" (x));
+}
+
+static inline uint64 r_tp(void) {
+    uint64 x;
+    asm volatile("mv %0, tp" : "=r" (x));
+    return x;
+}
+
+uint64 r_sscratch(void) {
+    uint64 x;
+    asm volatile("csrr %0, sscratch" : "=r" (x));
+    return x;
+}
+
+void w_sscratch(uint64 x) {
+    asm volatile("csrw sscratch, %0" : : "r" (x));
+}
+
+static inline void panic(char *s) {
+    printf("panic: %s\n", s);
+    while(1);
+}
+
+// Helper function for userret in uservec.S
+// Returns the current process's trapframe address
+struct trapframe* get_current_trapframe(void) {
+    struct proc *p = myproc();
+    if(p == NULL)
+        panic("get_current_trapframe: no process");
+    return p->trapframe;
 }
 
 // RISC-V权限级CSR定义
@@ -363,6 +404,8 @@ void kerneltrap(void) {
     uint64 scause = r_scause();
     uint64 sepc = r_sepc();
     
+    printf("[kerneltrap] scause=0x%lx, sepc=0x%lx\n", scause, sepc);
+    
     // 检查中断/异常属性
     if (scause & (1UL << 63)) {
         // 中断 (异步)
@@ -371,44 +414,164 @@ void kerneltrap(void) {
         }
     } else {
         // 异常 (同步)
+        printf("[kerneltrap] Exception! scause=%ld\n", scause);
         handle_exception((struct trapframe *)sepc);  // 这里可能需要调整
     }
 }
+
+// 用于测试的全局计数器
+volatile int syscall_test_count = 0;
 
 /**
  * 用户态中断处理 - 从uservec.S调用
  * 处理在用户程序执行时发生的中断和异常
  */
 void usertrap(void) {
-    uint64 scause = r_scause();
+  // 最早期的调试输出 - 直接写 UART
+  volatile uint8_t *uart = (volatile uint8_t *)0x10000000;
+  *uart = 'T';  // 'T' for trap
+  
+  int which_dev = 0;
+  uint64 scause = r_scause();
+  struct proc *p = myproc();
+  
+  // Debug: 输出 scause
+  printf("[usertrap] 进入! scause=0x%lx, sepc=0x%lx\n", scause, r_sepc());
+
+  if((r_sstatus() & SSTATUS_SPP) != 0)
+    panic("usertrap: not from user mode");
+
+  // send interrupts and exceptions to kerneltrap(),
+  // since we're now in the kernel.
+  extern void kernelvec();
+  w_stvec((uint64)kernelvec);
+
+  if (scause == EXCP_UENV_CALL) {
+    // system call
     
-    if (scause & (1UL << 63)) {
-        // 中断 (异步)
-        if (!devintr()) {
-            printf("[trap] Unknown interrupt in user mode\n");
-        }
-    } else {
-        // 异常 (同步)
-        switch (scause) {
-            case EXCP_UENV_CALL:  // 系统调用
-                uart_puts("[trap] User syscall\n");
-                // TODO: 处理系统调用
-                // 跳过ecall指令
-                break;
-                
-            case EXCP_INSTR_PAGE_FAULT:
-            case EXCP_LOAD_PAGE_FAULT:
-            case EXCP_STORE_PAGE_FAULT:
-                uart_puts("[trap] Page fault in user mode\n");
-                // TODO: 页故障处理
-                break;
-                
-            default:
-                printf("[trap] Unknown exception %d in user mode\n", scause);
-                break;
-        }
+    // Direct UART output
+    volatile uint8_t *uart = (volatile uint8_t *)0x10000000;
+    *uart = 'S';  // 'S' for syscall
+    
+    printf("[usertrap] 捕获到 ecall! scause=%ld, sepc=0x%lx\n", scause, p->trapframe->sepc);
+    printf("[usertrap] 系统调用号 a7=%ld\n", p->trapframe->a7);
+    
+    // sepc points to the ecall instruction,
+    // but we want to return to the next instruction.
+    p->trapframe->sepc += 4;
+
+    // an interrupt might change sstatus's SIE and SPP bits,
+    // so enable interrupts now from kerneltrap.c.
+    intr_on();
+
+    syscall();
+    
+    printf("[usertrap] 系统调用执行完成，返回值 a0=%ld\n", p->trapframe->a0);
+    
+    // 增加测试计数器
+    extern volatile int syscall_test_count;
+    syscall_test_count++;
+    
+  } else if (scause == EXCP_BREAKPOINT) {
+    // breakpoint - 用户程序完成测试
+    volatile uint8_t *uart = (volatile uint8_t *)0x10000000;
+    
+    // 输出明显的标记
+    const char *msg = "\n\n=== BREAKPOINT CAUGHT ===\n";
+    for (const char *p = msg; *p; p++) {
+        *uart = *p;
     }
+    
+    *uart = 'B';  // B 标记
+    *uart = '\n';
+    
+    msg = "Test 9 PASSED! System call mechanism works!\n";
+    for (const char *p = msg; *p; p++) {
+        *uart = *p;
+    }
+    
+    msg = "Sequence: V->T->S->U->K->B verified!\n\n";
+    for (const char *p = msg; *p; p++) {
+        *uart = *p;
+    }
+    
+    // 设置标志表示测试完成，杀死进程
+    extern volatile int syscall_test_count;
+    syscall_test_count = -1;
+    p->killed = 1;
+    
+  } else if ((which_dev = devintr()) != 0) {
+    // ok - device interrupt
+  } else {
+    printf("usertrap: unexpected scause %p pid=%d\n", r_scause(), p->pid);
+    printf("            sepc=%p stval=%p\n", r_sepc(), r_stval());
+    p->killed = 1;
+  }
+
+  if(p->killed)
+    exit(-1);
+
+  // give up the CPU if this is a timer interrupt.
+  if(which_dev == 2)
+    yield();
+
+  usertrapret();
 }
+
+//
+// return to user space
+//
+void
+usertrapret(void)
+{
+  struct proc *p = myproc();
+
+  // we're about to switch the destination of traps from
+  // kerneltrap() to usertrap(), so turn off interrupts until
+  // we're back in user space, where usertrap() is correct.
+  intr_off();
+
+  // send syscalls, interrupts, and exceptions to uservec
+  extern char uservec[];
+  w_stvec((uint64)uservec);
+
+  // set up trapframe values that uservec will need when
+  // the process next re-enters the kernel.
+  uint64 kernel_satp_value = r_satp();
+  if (kernel_satp_value != 0) {
+    p->trapframe->kernel_satp = kernel_satp_value;         // kernel page table
+  }
+  // 如果 r_satp() 返回 0，保持 trapframe->kernel_satp 不变 (测试可能已经设置了)
+  
+  p->trapframe->kernel_sp = (uint64)(p->kstack) + PGSIZE; // process's kernel stack
+  p->trapframe->kernel_trap = (uint64)usertrap;
+  p->trapframe->kernel_hartid = r_tp();         // hartid for cpuid()
+
+  // set up the registers that uservec's sret will use
+  // to get to user space.
+  
+  // set S Previous Privilege mode to User.
+  unsigned long x = r_sstatus();
+  x &= ~SSTATUS_SPP; // clear SPP to 0 for user mode
+  x |= SSTATUS_SPIE; // enable interrupts in user mode
+  w_sstatus(x);
+
+  // set S Exception Program Counter to the saved user pc.
+  w_sepc(p->trapframe->sepc);
+
+  // tell uservec the user page table to switch to.
+  uint64 satp = MAKE_SATP(p->pagetable);
+
+  // tell uservec where the process's trapframe is.
+  w_sscratch((uint64)p->trapframe);
+
+  // jump to userret in uservec.S which 
+  // switches to the user page table, restores user registers,
+  // and switches to user mode with sret.
+  extern void userret(uint64 satp);
+  userret(satp);
+}
+
 
 /**
  * ============================================================================

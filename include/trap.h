@@ -28,44 +28,44 @@ typedef uint64_t uint64;
 #define EXCP_STORE_PAGE_FAULT   15     // 存储页故障
 
 // 陷阱帧结构 - 保存中断/异常时的处理器状态
+// Layout must match uservec.S offsets!
 struct trapframe {
-    // RISC-V整数寄存器 (x0-x31)
-    uint64 zero;  // x0  - 硬连线0
-    uint64 ra;    // x1  - 返回地址
-    uint64 sp;    // x2  - 栈指针
-    uint64 gp;    // x3  - 全局指针
-    uint64 tp;    // x4  - 线程指针
-    uint64 t0;    // x5  - 临时寄存器0
-    uint64 t1;    // x6  - 临时寄存器1
-    uint64 t2;    // x7  - 临时寄存器2
-    uint64 s0;    // x8  - 保存寄存器0 (帧指针)
-    uint64 s1;    // x9  - 保存寄存器1
-    uint64 a0;    // x10 - 函数参数/返回值0
-    uint64 a1;    // x11 - 函数参数/返回值1
-    uint64 a2;    // x12 - 函数参数2
-    uint64 a3;    // x13 - 函数参数3
-    uint64 a4;    // x14 - 函数参数4
-    uint64 a5;    // x15 - 函数参数5
-    uint64 a6;    // x16 - 函数参数6
-    uint64 a7;    // x17 - 函数参数7
-    uint64 s2;    // x18 - 保存寄存器2
-    uint64 s3;    // x19 - 保存寄存器3
-    uint64 s4;    // x20 - 保存寄存器4
-    uint64 s5;    // x21 - 保存寄存器5
-    uint64 s6;    // x22 - 保存寄存器6
-    uint64 s7;    // x23 - 保存寄存器7
-    uint64 s8;    // x24 - 保存寄存器8
-    uint64 s9;    // x25 - 保存寄存器9
-    uint64 s10;   // x26 - 保存寄存器10
-    uint64 s11;   // x27 - 保存寄存器11
-    uint64 t3;    // x28 - 临时寄存器3
-    uint64 t4;    // x29 - 临时寄存器4
-    uint64 t5;    // x30 - 临时寄存器5
-    uint64 t6;    // x31 - 临时寄存器6
-
-    // CSR (控制和状态寄存器) - 只保存必要的2个
-    uint64 sepc;      // 监督异常程序计数器 - 保存导致陷阱的指令地址
-    uint64 scause;    // 监督异常原因 - 标识中断/异常类型
+    /*   0 */ uint64 kernel_satp;   // kernel page table
+    /*   8 */ uint64 kernel_sp;     // top of process's kernel stack
+    /*  16 */ uint64 kernel_trap;   // usertrap()
+    /*  24 */ uint64 sepc;           // saved user program counter
+    /*  32 */ uint64 kernel_hartid;  // saved kernel tp
+    /*  40 */ uint64 ra;
+    /*  48 */ uint64 sp;
+    /*  56 */ uint64 gp;
+    /*  64 */ uint64 tp;
+    /*  72 */ uint64 t0;
+    /*  80 */ uint64 t1;
+    /*  88 */ uint64 t2;
+    /*  96 */ uint64 s0;
+    /* 104 */ uint64 s1;
+    /* 112 */ uint64 a0;
+    /* 120 */ uint64 a1;
+    /* 128 */ uint64 a2;
+    /* 136 */ uint64 a3;
+    /* 144 */ uint64 a4;
+    /* 152 */ uint64 a5;
+    /* 160 */ uint64 a6;
+    /* 168 */ uint64 a7;
+    /* 176 */ uint64 s2;
+    /* 184 */ uint64 s3;
+    /* 192 */ uint64 s4;
+    /* 200 */ uint64 s5;
+    /* 208 */ uint64 s6;
+    /* 216 */ uint64 s7;
+    /* 224 */ uint64 s8;
+    /* 232 */ uint64 s9;
+    /* 240 */ uint64 s10;
+    /* 248 */ uint64 s11;
+    /* 256 */ uint64 t3;
+    /* 264 */ uint64 t4;
+    /* 272 */ uint64 t5;
+    /* 280 */ uint64 t6;
 };
 
 // 中断处理函数类型定义
@@ -83,6 +83,7 @@ int intr_get(void);                // 获取当前中断状态
 // 中断处理函数（汇编入口调用）
 void kerneltrap(void);             // 内核态中断处理
 void usertrap(void);               // 用户态中断处理
+void usertrapret(void);            // 用户态中断返回
 int devintr(void);                 // 设备中断分发
 void machine_timer_handler(void);  // Machine 模式时钟中断处理
 
@@ -115,5 +116,11 @@ extern volatile uint64 ticks;      // 全局时钟计数器
 
 // 时间中断间隔 (QEMU virt 平台频率为 10MHz)
 #define TIMER_INTERVAL (1000000)  // 100ms 触发一次时间中断
+
+// CSR 寄存器读写函数声明
+void w_stvec(uint64 x);
+uint64 r_stvec(void);
+void w_sscratch(uint64 x);
+uint64 r_sscratch(void);
 
 #endif

@@ -3,7 +3,16 @@
 #include <stdint.h>
 
 #define PAGE_SIZE 4096
+#define PGSIZE 4096  // 别名，xv6风格
 
+// RISC-V Sv39 SATP 寄存器格式
+#define SATP_SV39 (8UL << 60)
+#define MAKE_SATP(pagetable) (SATP_SV39 | (((uint64_t)pagetable) >> 12))
+
+// 工具宏
+#define PGROUNDUP(sz)  (((sz)+PGSIZE-1) & ~(PGSIZE-1))
+#define PGROUNDDOWN(a) (((a)) & ~(PGSIZE-1))
+#define NELEM(x) (sizeof(x)/sizeof((x)[0]))
 
 // 权限位定义
 #define PTE_R (1L << 1)  // 读权限
@@ -38,6 +47,18 @@ void destroy_pagetable(pagetable_t pt);
 void dump_pagetable(pagetable_t pt, int level);
 void kvminit(void);
 void kvminithart(void);
+
+// 用户-内核内存拷贝函数 (xv6-style)
+int copyout(pagetable_t, uint64_t, char*, uint64_t);
+int copyin(pagetable_t, char*, uint64_t, uint64_t);
+int copyinstr(pagetable_t, char*, uint64_t, uint64_t);
+int either_copyout(int user_dst, uint64_t dst, void *src, uint64_t len);
+int either_copyin(void *dst, int user_src, uint64_t src, uint64_t len);
+
+// 字符串函数
+int strlen(const char*);
+int strncmp(const char*, const char*, uint64_t);
+char* safestrcpy(char*, const char*, int);
 
 // 页面替换系统函数声明
 void init_page_replacement(void);

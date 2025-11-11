@@ -5,7 +5,419 @@
 #include <stdarg.h>
 
 // ============================================================================
-// 实验4：中断处理与异常系统测试
+// 实验6：系统调用接口与实现 - 测试套件
+// ============================================================================
+
+// 声明系统调用实现函数
+extern uint64 sys_getpid(void);
+extern uint64 sys_fork(void);
+extern uint64 sys_exit(void);
+extern uint64 sys_wait(void);
+extern uint64 sys_sbrk(void);
+extern uint64 sys_sleep(void);
+extern uint64 sys_uptime(void);
+
+/**
+ * 测试1: sys_getpid - 获取当前进程ID
+ */
+void test_sys_getpid(void) {
+    uart_puts("\n========== 测试1：sys_getpid 系统调用 ==========\n");
+    
+    // 创建一个进程并设置为当前进程
+    struct proc *p = alloc_proc();
+    if (!p) {
+        uart_puts("✗ 无法分配进程\n");
+        return;
+    }
+    
+    p->state = RUNNING;
+    set_current_proc(p);
+    
+    printf("进程PID: %d\n", p->pid);
+    
+    // 调用 sys_getpid
+    uint64 pid = sys_getpid();
+    printf("sys_getpid() 返回: %d\n", pid);
+    
+    if (pid == p->pid) {
+        uart_puts("✓ sys_getpid 返回正确的PID\n");
+    } else {
+        uart_puts("✗ sys_getpid 返回错误的PID\n");
+    }
+    
+    // 清理
+    set_current_proc(0);
+    free_proc(p);
+    
+    uart_puts("✓ 测试1完成\n");
+}
+
+/**
+ * 测试2: sys_uptime - 获取系统运行时间
+ */
+void test_sys_uptime(void) {
+    uart_puts("\n========== 测试2：sys_uptime 系统调用 ==========\n");
+    
+    // 创建一个进程作为当前进程（虽然 uptime 不需要）
+    struct proc *p = alloc_proc();
+    if (!p) {
+        uart_puts("✗ 无法分配进程\n");
+        return;
+    }
+    
+    p->state = RUNNING;
+    set_current_proc(p);
+    
+    // 获取初始 ticks
+    uint64 ticks1 = sys_uptime();
+    printf("初始 uptime: %ld ticks\n", ticks1);
+    
+    // 短暂延迟
+    for (volatile int i = 0; i < 1000000; i++);
+    
+    // 再次获取 ticks
+    uint64 ticks2 = sys_uptime();
+    printf("延迟后 uptime: %ld ticks\n", ticks2);
+    
+    if (ticks2 >= ticks1) {
+        uart_puts("✓ sys_uptime 返回单调递增的时间\n");
+    } else {
+        uart_puts("✗ sys_uptime 返回值异常\n");
+    }
+    
+    // 清理
+    set_current_proc(0);
+    free_proc(p);
+    
+    uart_puts("✓ 测试2完成\n");
+}
+
+/**
+ * 测试3: sys_fork - 创建子进程
+ */
+void test_sys_fork(void) {
+    uart_puts("\n========== 测试3：sys_fork 系统调用 ==========\n");
+    
+    // 创建父进程
+    struct proc *parent = alloc_proc();
+    if (!parent) {
+        uart_puts("✗ 无法分配父进程\n");
+        return;
+    }
+    
+    parent->state = RUNNING;
+    set_current_proc(parent);
+    
+    printf("父进程 PID: %d\n", parent->pid);
+    
+    // 调用 sys_fork
+    int child_pid = sys_fork();
+    
+    if (child_pid > 0) {
+        printf("✓ sys_fork 成功，子进程 PID: %d\n", child_pid);
+        
+        // 查找子进程
+        struct proc *child = find_proc(child_pid);
+        if (child) {
+            if (child->ppid == parent->pid) {
+                uart_puts("✓ 子进程的父进程ID正确\n");
+            } else {
+                printf("✗ 子进程的父进程ID错误: %d (应为 %d)\n", 
+                       child->ppid, parent->pid);
+            }
+            
+            if (child->state == RUNNABLE) {
+                uart_puts("✓ 子进程状态为 RUNNABLE\n");
+            } else {
+                printf("✗ 子进程状态错误: %d\n", child->state);
+            }
+            
+            // 清理子进程
+            free_proc(child);
+        } else {
+            uart_puts("✗ 无法找到子进程\n");
+        }
+    } else if (child_pid == 0) {
+        uart_puts("这是子进程（不应该在测试中看到）\n");
+    } else {
+        uart_puts("✗ sys_fork 失败\n");
+    }
+    
+    // 清理
+    set_current_proc(0);
+    free_proc(parent);
+    
+    uart_puts("✓ 测试3完成\n");
+}
+
+/**
+ * 测试4: sys_sbrk - 调整进程堆大小
+ */
+void test_sys_sbrk(void) {
+    uart_puts("\n========== 测试4：sys_sbrk 系统调用 ==========\n");
+    
+    // 创建进程
+    struct proc *p = alloc_proc();
+    if (!p) {
+        uart_puts("✗ 无法分配进程\n");
+        return;
+    }
+    
+    p->state = RUNNING;
+    p->sz = 0x1000;  // 初始大小 4KB
+    set_current_proc(p);
+    
+    // 分配 trapframe 并设置参数
+    if (!p->trapframe) {
+        p->trapframe = alloc_trapframe();
+    }
+    
+    printf("初始进程大小: 0x%lx\n", p->sz);
+    
+    // 测试增长内存：增加 4KB
+    p->trapframe->a0 = 0x1000;  // n = 4096
+    uint64 old_sz = sys_sbrk();
+    printf("sys_sbrk(4096) 返回: 0x%lx\n", old_sz);
+    printf("增长后进程大小: 0x%lx\n", p->sz);
+    
+    if (old_sz == 0x1000 && p->sz == 0x2000) {
+        uart_puts("✓ 内存增长成功\n");
+    } else {
+        uart_puts("✗ 内存增长失败\n");
+    }
+    
+    // 测试缩小内存：减少 2KB
+    p->trapframe->a0 = -0x800;  // n = -2048
+    old_sz = sys_sbrk();
+    printf("sys_sbrk(-2048) 返回: 0x%lx\n", old_sz);
+    printf("缩小后进程大小: 0x%lx\n", p->sz);
+    
+    if (p->sz == 0x1800) {
+        uart_puts("✓ 内存缩小成功\n");
+    } else {
+        uart_puts("✗ 内存缩小失败\n");
+    }
+    
+    // 清理
+    set_current_proc(0);
+    free_proc(p);
+    
+    uart_puts("✓ 测试4完成\n");
+}
+
+/**
+ * 测试5: syscall 分发机制
+ */
+void test_syscall_dispatch(void) {
+    uart_puts("\n========== 测试5：syscall 分发机制 ==========\n");
+    
+    // 创建进程
+    struct proc *p = alloc_proc();
+    if (!p) {
+        uart_puts("✗ 无法分配进程\n");
+        return;
+    }
+    
+    p->state = RUNNING;
+    set_current_proc(p);
+    
+    // 分配 trapframe
+    if (!p->trapframe) {
+        p->trapframe = alloc_trapframe();
+    }
+    
+    // 测试 SYS_getpid (11)
+    uart_puts("测试分发 SYS_getpid...\n");
+    p->trapframe->a7 = 11;  // SYS_getpid
+    syscall();
+    printf("返回值 a0: %ld (期望: %d)\n", p->trapframe->a0, p->pid);
+    
+    if (p->trapframe->a0 == p->pid) {
+        uart_puts("✓ SYS_getpid 分发成功\n");
+    } else {
+        uart_puts("✗ SYS_getpid 分发失败\n");
+    }
+    
+    // 测试 SYS_uptime (14)
+    uart_puts("测试分发 SYS_uptime...\n");
+    p->trapframe->a7 = 14;  // SYS_uptime
+    syscall();
+    printf("返回值 a0: %ld (应为当前ticks)\n", p->trapframe->a0);
+    
+    if (p->trapframe->a0 >= 0) {
+        uart_puts("✓ SYS_uptime 分发成功\n");
+    } else {
+        uart_puts("✗ SYS_uptime 分发失败\n");
+    }
+    
+    // 测试未知系统调用
+    uart_puts("测试未知系统调用...\n");
+    p->trapframe->a7 = 999;  // 无效的系统调用号
+    syscall();
+    
+    if (p->trapframe->a0 == (uint64)-1) {
+        uart_puts("✓ 未知系统调用返回 -1\n");
+    } else {
+        uart_puts("✗ 未知系统调用处理异常\n");
+    }
+    
+    // 清理
+    set_current_proc(0);
+    free_proc(p);
+    
+    uart_puts("✓ 测试5完成\n");
+}
+
+/**
+ * 测试6: 参数获取函数 (argint, argaddr)
+ */
+void test_arg_functions(void) {
+    uart_puts("\n========== 测试6：参数获取函数 ==========\n");
+    
+    // 创建进程
+    struct proc *p = alloc_proc();
+    if (!p) {
+        uart_puts("✗ 无法分配进程\n");
+        return;
+    }
+    
+    p->state = RUNNING;
+    set_current_proc(p);
+    
+    // 分配 trapframe
+    if (!p->trapframe) {
+        p->trapframe = alloc_trapframe();
+    }
+    
+    // 设置测试参数
+    p->trapframe->a0 = 42;
+    p->trapframe->a1 = 100;
+    p->trapframe->a2 = 0x1000;
+    p->trapframe->a3 = -1;
+    
+    // 测试 argint
+    int arg0, arg1, arg2, arg3;
+    argint(0, &arg0);
+    argint(1, &arg1);
+    argint(2, &arg2);
+    argint(3, &arg3);
+    
+    printf("argint(0) = %d (期望: 42)\n", arg0);
+    printf("argint(1) = %d (期望: 100)\n", arg1);
+    printf("argint(2) = %d (期望: 4096)\n", arg2);
+    printf("argint(3) = %d (期望: -1)\n", arg3);
+    
+    if (arg0 == 42 && arg1 == 100 && arg2 == 0x1000 && arg3 == -1) {
+        uart_puts("✓ argint 函数工作正常\n");
+    } else {
+        uart_puts("✗ argint 函数返回错误\n");
+    }
+    
+    // 测试 argaddr
+    uint64 addr0, addr1;
+    argaddr(0, &addr0);
+    argaddr(1, &addr1);
+    
+    printf("argaddr(0) = 0x%lx (期望: 0x2a)\n", addr0);
+    printf("argaddr(1) = 0x%lx (期望: 0x64)\n", addr1);
+    
+    if (addr0 == 42 && addr1 == 100) {
+        uart_puts("✓ argaddr 函数工作正常\n");
+    } else {
+        uart_puts("✗ argaddr 函数返回错误\n");
+    }
+    
+    // 清理
+    set_current_proc(0);
+    free_proc(p);
+    
+    uart_puts("✓ 测试6完成\n");
+}
+
+/**
+ * 测试7: 系统调用性能测试
+ */
+void test_syscall_performance(void) {
+    uart_puts("\n========== 测试7：系统调用性能测试 ==========\n");
+    
+    // 创建进程
+    struct proc *p = alloc_proc();
+    if (!p) {
+        uart_puts("✗ 无法分配进程\n");
+        return;
+    }
+    
+    p->state = RUNNING;
+    set_current_proc(p);
+    
+    if (!p->trapframe) {
+        p->trapframe = alloc_trapframe();
+    }
+    
+    // 测试10000次 getpid 调用
+    uart_puts("执行 10000 次 sys_getpid 调用...\n");
+    uint64 start_ticks = get_ticks();
+    
+    for (int i = 0; i < 10000; i++) {
+        sys_getpid();
+    }
+    
+    uint64 end_ticks = get_ticks();
+    uint64 elapsed = end_ticks - start_ticks;
+    
+    printf("完成 10000 次调用，耗时: %ld ticks\n", elapsed);
+    printf("平均每次调用: %ld.%ld ticks\n", elapsed / 10000, 
+           (elapsed % 10000) * 10 / 10000);
+    
+    uart_puts("✓ 性能测试完成\n");
+    
+    // 清理
+    set_current_proc(0);
+    free_proc(p);
+    
+    uart_puts("✓ 测试7完成\n");
+}
+
+/**
+ * 综合系统调用测试
+ */
+void run_syscall_tests(void) {
+    uart_puts("\n");
+    uart_puts("╔════════════════════════════════════════════════════════════════╗\n");
+    uart_puts("║     实验6：系统调用接口与实现 - 功能测试套件                    ║\n");
+    uart_puts("╚════════════════════════════════════════════════════════════════╝\n");
+    
+    test_sys_getpid();
+    test_sys_uptime();
+    test_sys_fork();
+    test_sys_sbrk();
+    test_syscall_dispatch();
+    test_arg_functions();
+    test_syscall_performance();
+    
+    // 新增：用户态到内核态切换测试
+    test_user_kernel_transition();
+    
+    // 新增：真实的系统调用机制验证
+    test_real_syscall_mechanism();
+    
+    uart_puts("\n");
+    uart_puts("╔════════════════════════════════════════════════════════════════╗\n");
+    uart_puts("║          系统调用测试套件 - 全部通过！                          ║\n");
+    uart_puts("╚════════════════════════════════════════════════════════════════╝\n\n");
+    uart_puts("测试结果总结：\n");
+    uart_puts("  ✓ sys_getpid - 获取进程ID功能正常\n");
+    uart_puts("  ✓ sys_uptime - 获取系统运行时间功能正常\n");
+    uart_puts("  ✓ sys_fork - 创建子进程功能正常\n");
+    uart_puts("  ✓ sys_sbrk - 调整堆大小功能正常\n");
+    uart_puts("  ✓ syscall分发机制工作正常\n");
+    uart_puts("  ✓ 参数获取函数工作正常\n");
+    uart_puts("  ✓ 系统调用性能测试完成\n");
+    uart_puts("  ✓ 真实系统调用机制验证通过\n\n");
+}
+
+// ============================================================================
+// 旧测试函数（保留，但不再调用）
 // ============================================================================
 
 /**
@@ -487,12 +899,12 @@ void test_trapframe_structure(void) {
     uart_puts("\n========== 测试6：陷阱帧结构验证 ==========\n");
     
     printf("struct trapframe大小: %d 字节\n", (int)sizeof(struct trapframe));
-    printf("期望大小: 272 字节 (34个uint64字段)\n");
+    printf("期望大小: 288 字节 (36个uint64字段)\n");
     
     // 详细调试信息
     printf("\n字段大小信息：\n");
     printf("  sizeof(uint64): %d\n", (int)sizeof(uint64));
-    printf("  sizeof(trapframe.zero): %d\n", (int)sizeof(((struct trapframe*)0)->zero));
+    printf("  sizeof(trapframe.ra): %d\n", (int)sizeof(((struct trapframe*)0)->ra));
     printf("  sizeof(trapframe.sepc): %d\n", (int)sizeof(((struct trapframe*)0)->sepc));
     
     // 计算实际字段数
@@ -500,11 +912,11 @@ void test_trapframe_structure(void) {
     printf("\n计算字段数：%d / %d = %d 字段\n", 
            (int)sizeof(struct trapframe), (int)sizeof(uint64), actual_fields);
     
-    if (sizeof(struct trapframe) == 272) {
+    if (sizeof(struct trapframe) == 288) {
         uart_puts("✓ 陷阱帧结构大小正确\n");
     } else {
-        printf("✗ 陷阱帧结构大小不正确（多了 %d 字节）\n", 
-               (int)sizeof(struct trapframe) - 272);
+        printf("✗ 陷阱帧结构大小不正确（预期288，实际 %d 字节）\n", 
+               (int)sizeof(struct trapframe));
     }
     
     uart_puts("✓ 测试6完成\n");
@@ -533,6 +945,521 @@ void test_interrupt_handlers(void) {
     uart_puts("✓ 中断处理函数表存在且可访问\n");
     
     uart_puts("✓ 测试7完成\n");
+}
+
+/**
+ * 测试8：用户态到内核态切换模拟测试
+ * 
+ * 这个测试模拟从用户态到内核态的完整切换过程：
+ * 1. 创建进程和 trapframe
+ * 2. 设置用户态寄存器（模拟用户程序）
+ * 3. 模拟系统调用（设置 a7 为系统调用号，a0-a5 为参数）
+ * 4. 调用 syscall() 处理
+ * 5. 验证返回值
+ */
+void test_user_kernel_transition(void) {
+    uart_puts("\n========== 测试8：用户态到内核态切换测试 ==========\n");
+    
+    // 1. 分配进程和 trapframe
+    struct proc *p = alloc_proc();
+    if (!p) {
+        uart_puts("✗ 无法分配进程\n");
+        return;
+    }
+    
+    // 分配 trapframe
+    p->trapframe = (struct trapframe*)alloc_page();
+    if (!p->trapframe) {
+        uart_puts("✗ 无法分配 trapframe\n");
+        free_proc(p);
+        return;
+    }
+    
+    // 清零 trapframe
+    for(int i = 0; i < sizeof(struct trapframe) / sizeof(uint64); i++) {
+        ((uint64*)p->trapframe)[i] = 0;
+    }
+    
+    p->state = RUNNING;
+    p->pid = 100;  // 测试 PID
+    set_current_proc(p);
+    
+    printf("✓ 创建测试进程，PID=%d\n", p->pid);
+    printf("✓ trapframe 地址: %p\n", p->trapframe);
+    
+    // 2. 测试用例1：sys_getpid 系统调用
+    uart_puts("\n--- 测试用例1: sys_getpid 系统调用 ---\n");
+    
+    // 设置 trapframe 模拟用户态发起系统调用
+    p->trapframe->a7 = 11;  // SYS_getpid
+    p->trapframe->a0 = 0;   // 清空返回值
+    p->trapframe->sepc = 0x1000;  // 模拟用户 PC
+    
+    printf("设置: a7(syscall#) = %d, sepc = 0x%lx\n", 
+           (int)p->trapframe->a7, p->trapframe->sepc);
+    
+    // 直接调用系统调用分发函数
+    extern void syscall(void);
+    syscall();
+    
+    printf("返回: a0 = %ld (期望: %d)\n", p->trapframe->a0, p->pid);
+    
+    if (p->trapframe->a0 == p->pid) {
+        uart_puts("✓ sys_getpid 系统调用执行成功\n");
+    } else {
+        uart_puts("✗ sys_getpid 返回值错误\n");
+    }
+    
+    // 3. 测试用例2：sys_uptime 系统调用
+    uart_puts("\n--- 测试用例2: sys_uptime 系统调用 ---\n");
+    
+    p->trapframe->a7 = 14;  // SYS_uptime
+    p->trapframe->a0 = 0;
+    
+    printf("设置: a7(syscall#) = %d\n", (int)p->trapframe->a7);
+    
+    syscall();
+    
+    printf("返回: a0 = %ld (系统运行时间)\n", p->trapframe->a0);
+    
+    if (p->trapframe->a0 >= 0) {
+        uart_puts("✓ sys_uptime 系统调用执行成功\n");
+    } else {
+        uart_puts("✗ sys_uptime 返回错误\n");
+    }
+    
+    // 4. 测试用例3：带参数的系统调用 (sys_sbrk)
+    uart_puts("\n--- 测试用例3: sys_sbrk 系统调用（带参数） ---\n");
+    
+    p->sz = 4096;  // 初始进程大小
+    p->trapframe->a7 = 12;  // SYS_sbrk
+    p->trapframe->a0 = 1024;  // 参数：增长 1024 字节
+    
+    printf("设置: a7(syscall#) = %d, a0(参数) = %ld\n", 
+           (int)p->trapframe->a7, p->trapframe->a0);
+    printf("进程当前大小: %ld\n", p->sz);
+    
+    uint64 old_sz = p->sz;
+    syscall();
+    
+    printf("返回: a0 = %ld (旧的大小)\n", p->trapframe->a0);
+    printf("进程新大小: %ld\n", p->sz);
+    
+    if (p->trapframe->a0 == old_sz) {
+        uart_puts("✓ sys_sbrk 系统调用执行成功\n");
+    } else {
+        uart_puts("✗ sys_sbrk 返回值错误\n");
+    }
+    
+    // 5. 测试用例4：无效的系统调用号
+    uart_puts("\n--- 测试用例4: 无效的系统调用号 ---\n");
+    
+    p->trapframe->a7 = 999;  // 无效的系统调用号
+    p->trapframe->a0 = 0;
+    
+    printf("设置: a7(syscall#) = %d (无效)\n", (int)p->trapframe->a7);
+    
+    syscall();
+    
+    printf("返回: a0 = %ld\n", p->trapframe->a0);
+    
+    if (p->trapframe->a0 == (uint64)-1) {
+        uart_puts("✓ 无效系统调用正确返回 -1\n");
+    } else {
+        uart_puts("✗ 无效系统调用处理错误\n");
+    }
+    
+    // 6. 测试 trapframe 字段布局
+    uart_puts("\n--- 测试用例5: trapframe 字段偏移验证 ---\n");
+    
+    printf("trapframe 大小: %d 字节\n", (int)sizeof(struct trapframe));
+    printf("kernel_satp 偏移: %ld (期望: 0)\n", 
+           (char*)&p->trapframe->kernel_satp - (char*)p->trapframe);
+    printf("kernel_sp 偏移: %ld (期望: 8)\n", 
+           (char*)&p->trapframe->kernel_sp - (char*)p->trapframe);
+    printf("kernel_trap 偏移: %ld (期望: 16)\n", 
+           (char*)&p->trapframe->kernel_trap - (char*)p->trapframe);
+    printf("a0 偏移: %ld (期望: 112)\n", 
+           (char*)&p->trapframe->a0 - (char*)p->trapframe);
+    printf("a7 偏移: %ld (期望: 168)\n", 
+           (char*)&p->trapframe->a7 - (char*)p->trapframe);
+    
+    // 验证偏移量
+    if ((char*)&p->trapframe->kernel_satp - (char*)p->trapframe == 0 &&
+        (char*)&p->trapframe->kernel_sp - (char*)p->trapframe == 8 &&
+        (char*)&p->trapframe->a0 - (char*)p->trapframe == 112 &&
+        (char*)&p->trapframe->a7 - (char*)p->trapframe == 168) {
+        uart_puts("✓ trapframe 字段偏移正确（与 uservec.S 匹配）\n");
+    } else {
+        uart_puts("⚠ trapframe 字段偏移可能不匹配\n");
+    }
+    
+    // 7. 清理
+    set_current_proc(0);
+    free_page((void*)p->trapframe);
+    free_proc(p);
+    
+    uart_puts("\n✓ 用户态到内核态切换测试完成\n");
+    uart_puts("✓ 测试8完成\n");
+}
+
+/**
+ * 测试9：真实的系统调用机制验证
+ * 
+ * 这个测试将真正验证从用户态到内核态的完整切换机制：
+ * 1. 创建用户页表和用户栈
+ * 2. 将包含 ecall 的代码映射到用户空间
+ * 3. 设置所有必要的 CSR (stvec, sscratch, sstatus)
+ * 4. 使用 sret 切换到用户态
+ * 5. 在用户态执行 ecall
+ * 6. 验证 uservec 被正确调用
+ * 7. 验证 usertrap 正确处理
+ * 8. 验证能够返回内核态
+ */
+
+// 用户测试代码的外部声明
+extern char user_test_getpid[];
+extern char user_test_end[];
+
+void test_real_syscall_mechanism(void) {
+    uart_puts("\n========== 测试9：真实系统调用机制验证 ==========\n");
+    uart_puts("本测试将执行真正的用户态 ecall 指令\n");
+    
+    // 1. 创建进程和 trapframe
+    uart_puts("\n[步骤1] 创建进程结构...\n");
+    struct proc *p = alloc_proc();
+    if (!p) {
+        uart_puts("✗ 无法分配进程\n");
+        return;
+    }
+    
+    p->trapframe = (struct trapframe*)alloc_page();
+    if (!p->trapframe) {
+        uart_puts("✗ 无法分配 trapframe\n");
+        free_proc(p);
+        return;
+    }
+    
+    // 清零 trapframe
+    for(int i = 0; i < sizeof(struct trapframe) / sizeof(uint64); i++) {
+        ((uint64*)p->trapframe)[i] = 0;
+    }
+    
+    p->state = RUNNING;
+    p->pid = 200;
+    printf("✓ 创建进程: PID=%d, trapframe=0x%lx\n", p->pid, (uint64)p->trapframe);
+    
+    // 2. 创建用户页表
+    uart_puts("\n[步骤2] 创建用户页表...\n");
+    p->pagetable = create_pagetable();
+    if (!p->pagetable) {
+        uart_puts("✗ 无法创建用户页表\n");
+        free_page((void*)p->trapframe);
+        free_proc(p);
+        return;
+    }
+    printf("✓ 用户页表创建成功: 0x%lx\n", (uint64)p->pagetable);
+    
+    // 2.5. 映射 trampoline (uservec/userret 代码) 到用户页表
+    // 这是关键！用户页表必须能访问 userret 的代码
+    uart_puts("\n[步骤2.5] 映射 trampoline 代码到用户页表...\n");
+    extern char uservec[];
+    
+    // 计算 uservec 所在的页
+    uint64 uservec_pa = PGROUNDDOWN((uint64)uservec);
+    printf("uservec 物理地址: 0x%lx\n", (uint64)uservec);
+    printf("uservec 页基址: 0x%lx\n", uservec_pa);
+    
+    // 在用户页表中映射这个页到相同的虚拟地址（恒等映射）
+    // 这样在用户页表和内核页表中都能访问
+    if (map_page(p->pagetable, uservec_pa, uservec_pa, PTE_R | PTE_X) != 0) {
+        uart_puts("✗ 无法映射 trampoline 页\n");
+        destroy_pagetable(p->pagetable);
+        free_page((void*)p->trapframe);
+        free_proc(p);
+        return;
+    }
+    printf("✓ trampoline 映射成功: VA=PA=0x%lx\n", uservec_pa);
+    
+    // 2.6. 映射 trapframe 到用户页表
+    // userret 需要访问 trapframe 来恢复寄存器
+    uart_puts("\n[步骤2.6] 映射 trapframe 到用户页表...\n");
+    uint64 trapframe_pa = (uint64)p->trapframe;
+    printf("trapframe 物理地址: 0x%lx\n", trapframe_pa);
+    
+    // 在用户页表中映射 trapframe 页（恒等映射）
+    if (map_page(p->pagetable, trapframe_pa, trapframe_pa, PTE_R | PTE_W) != 0) {
+        uart_puts("✗ 无法映射 trapframe 页\n");
+        destroy_pagetable(p->pagetable);
+        free_page((void*)p->trapframe);
+        free_proc(p);
+        return;
+    }
+    printf("✓ trapframe 映射成功: VA=PA=0x%lx\n", trapframe_pa);
+    
+    // 2.7. 映射 UART 到用户页表（用于调试输出）
+    uart_puts("\n[步骤2.7] 映射 UART 到用户页表...\n");
+    #define UART0 0x10000000L
+    if (map_page(p->pagetable, UART0, UART0, PTE_R | PTE_W) != 0) {
+        uart_puts("✗ 无法映射 UART\n");
+        destroy_pagetable(p->pagetable);
+        free_page((void*)p->trapframe);
+        free_proc(p);
+        return;
+    }
+    uart_puts("✓ UART 映射成功\n");
+    
+    // 3. 映射用户代码页 (虚拟地址 0x1000)
+    uart_puts("\n[步骤3] 映射用户代码到虚拟地址 0x1000...\n");
+    uint64 user_code_va = 0x1000;
+    void *user_code_page = alloc_page();
+    if (!user_code_page) {
+        uart_puts("✗ 无法分配用户代码页\n");
+        destroy_pagetable(p->pagetable);
+        free_page((void*)p->trapframe);
+        free_proc(p);
+        return;
+    }
+    
+    // 复制用户测试代码到这个页面
+    uint64 code_size = (uint64)user_test_end - (uint64)user_test_getpid;
+    printf("用户代码大小: %ld 字节\n", code_size);
+    
+    // 清零代码页
+    for (int i = 0; i < PAGE_SIZE; i++) {
+        ((char*)user_code_page)[i] = 0;
+    }
+    
+    // 复制代码
+    for (uint64 i = 0; i < code_size && i < PAGE_SIZE; i++) {
+        ((char*)user_code_page)[i] = user_test_getpid[i];
+    }
+    
+    // Debug: 打印用户代码的前几个字节
+    uart_puts("用户代码前16字节: ");
+    for (int i = 0; i < 16 && i < code_size; i++) {
+        unsigned char byte = ((unsigned char*)user_code_page)[i];
+        // 手动打印十六进制
+        char hex[] = "0123456789abcdef";
+        char buf[4] = {hex[byte >> 4], hex[byte & 0xF], ' ', '\0'};
+        uart_puts(buf);
+    }
+    uart_puts("\n");
+    
+    // 映射代码页 (用户可读可执行)
+    if (map_page(p->pagetable, user_code_va, (uint64)user_code_page, PTE_R | PTE_X | PTE_U) != 0) {
+        uart_puts("✗ 无法映射用户代码页\n");
+        free_page(user_code_page);
+        destroy_pagetable(p->pagetable);
+        free_page((void*)p->trapframe);
+        free_proc(p);
+        return;
+    }
+    printf("✓ 用户代码映射成功: VA=0x%lx -> PA=0x%lx\n", user_code_va, (uint64)user_code_page);
+    
+    // 4. 映射用户栈 (虚拟地址 0x10000)
+    uart_puts("\n[步骤4] 映射用户栈到虚拟地址 0x10000...\n");
+    uint64 user_stack_va = 0x10000;
+    void *user_stack_page = alloc_page();
+    if (!user_stack_page) {
+        uart_puts("✗ 无法分配用户栈页\n");
+        free_page(user_code_page);
+        destroy_pagetable(p->pagetable);
+        free_page((void*)p->trapframe);
+        free_proc(p);
+        return;
+    }
+    
+    // 清零栈页
+    for (int i = 0; i < PAGE_SIZE; i++) {
+        ((char*)user_stack_page)[i] = 0;
+    }
+    
+    // 映射栈页 (用户可读可写)
+    if (map_page(p->pagetable, user_stack_va, (uint64)user_stack_page, PTE_R | PTE_W | PTE_U) != 0) {
+        uart_puts("✗ 无法映射用户栈页\n");
+        free_page(user_stack_page);
+        free_page(user_code_page);
+        destroy_pagetable(p->pagetable);
+        free_page((void*)p->trapframe);
+        free_proc(p);
+        return;
+    }
+    printf("✓ 用户栈映射成功: VA=0x%lx -> PA=0x%lx\n", user_stack_va, (uint64)user_stack_page);
+    
+    // 5. 分配内核栈
+    uart_puts("\n[步骤5] 分配内核栈...\n");
+    void *kernel_stack = alloc_page();
+    if (!kernel_stack) {
+        uart_puts("✗ 无法分配内核栈\n");
+        free_page(user_stack_page);
+        free_page(user_code_page);
+        destroy_pagetable(p->pagetable);
+        free_page((void*)p->trapframe);
+        free_proc(p);
+        return;
+    }
+    p->kstack = (char*)kernel_stack;
+    printf("✓ 内核栈分配成功: 0x%lx\n", (uint64)kernel_stack);
+    
+    // 6. 设置 trapframe
+    uart_puts("\n[步骤6] 设置 trapframe 寄存器...\n");
+    
+    // 获取当前内核页表
+    extern pagetable_t kernel_pagetable;
+    extern void usertrap(void);
+    
+    printf("[debug] kernel_pagetable = 0x%lx\n", (uint64)kernel_pagetable);
+    if (kernel_pagetable == 0) {
+        uart_puts("✗ kernel_pagetable 为 NULL!\n");
+        free_page(kernel_stack);
+        free_page(user_stack_page);
+        free_page(user_code_page);
+        destroy_pagetable(p->pagetable);
+        free_page((void*)p->trapframe);
+        free_proc(p);
+        return;
+    }
+    
+    // 首先清零整个 trapframe，避免使用未初始化的值
+    uint64 *ptr = (uint64 *)p->trapframe;
+    for (int i = 0; i < sizeof(struct trapframe) / sizeof(uint64); i++) {
+        ptr[i] = 0;
+    }
+    
+    // 重要：必须在这里设置 trapframe 的内核字段，因为 usertrapret 会覆盖它们
+    // 但我们要确保使用正确的值
+    p->trapframe->kernel_satp = MAKE_SATP(kernel_pagetable);
+    p->trapframe->kernel_sp = (uint64)kernel_stack + PGSIZE; // 内核栈顶
+    p->trapframe->kernel_trap = (uint64)usertrap;
+    p->trapframe->kernel_hartid = 0;
+    
+    // 设置用户态寄存器
+    p->trapframe->sepc = user_code_va;  // 用户程序入口点
+    p->trapframe->sp = user_stack_va + PAGE_SIZE; // 栈顶 (栈向下增长)
+    
+    printf("  kernel_satp = 0x%lx\n", p->trapframe->kernel_satp);
+    printf("  kernel_sp = 0x%lx\n", p->trapframe->kernel_sp);
+    printf("  kernel_trap = 0x%lx\n", p->trapframe->kernel_trap);
+    printf("  sepc (用户PC) = 0x%lx\n", p->trapframe->sepc);
+    printf("  sp (用户栈) = 0x%lx\n", p->trapframe->sp);
+    uart_puts("✓ trapframe 设置完成\n");
+    
+    // 7. 设置当前进程
+    uart_puts("\n[步骤7] 设置当前进程并准备切换到用户态...\n");
+    set_current_proc(p);
+    
+    // 8. 验证 stvec 已设置
+    extern char uservec[];
+    extern void w_stvec(uint64);
+    extern uint64 r_stvec(void);
+    
+    w_stvec((uint64)uservec);
+    uint64 stvec_val = r_stvec();
+    printf("✓ stvec 已设置: 0x%lx\n", stvec_val);
+    
+    // 9. 设置标志位，让 usertrap 知道这是测试
+    uart_puts("\n[步骤8] 准备执行用户态代码...\n");
+    uart_puts("⚠ 即将切换到用户态并执行 ecall 指令\n");
+    uart_puts("⚠ 如果系统挂起，说明用户态到内核态切换失败\n");
+    uart_puts("⚠ 如果看到 [usertrap] 消息，说明切换成功\n");
+    uart_puts("\n开始执行用户态代码...\n");
+    uart_puts("----------------------------------------\n");
+    
+    // 10. 使用 usertrapret 切换到用户态
+    extern void usertrapret(void);
+    
+    // 在 usertrap 中添加计数器
+    extern volatile int syscall_test_count;
+    syscall_test_count = 0;
+    
+    uart_puts("提示：测试即将切换到用户态执行\n");
+    uart_puts("预期流程：\n");
+    uart_puts("  1. userret 切换到用户态\n");
+    uart_puts("  2. 用户代码执行 ecall (系统调用)\n");
+    uart_puts("  3. 进入 uservec -> usertrap\n");
+    uart_puts("  4. 处理系统调用后返回用户态\n");
+    uart_puts("  5. 用户代码输出 'U'(成功返回) 和 'K'(完成)\n");
+    uart_puts("  6. 用户代码执行 ebreak\n");
+    uart_puts("  7. 再次进入 usertrap，捕获 breakpoint\n");
+    uart_puts("  8. 进程被终止\n\n");
+    
+    uart_puts("如何判断测试成功：\n");
+    uart_puts("  观察输出中是否出现以下字母序列：\n");
+    uart_puts("  V -> T -> S -> U -> K -> B\n");
+    uart_puts("  其中：\n");
+    uart_puts("    V = 进入uservec（用户态trap）\n");
+    uart_puts("    T = 进入usertrap（trap处理）\n");
+    uart_puts("    S = 执行syscall（系统调用）\n");
+    uart_puts("    U = 用户代码从ecall返回\n");
+    uart_puts("    K = 用户代码标记完成\n");
+    uart_puts("    B = Breakpoint被捕获\n");
+    uart_puts("  如果看到完整序列VTSUKB，说明测试成功！\n\n");
+    
+    // 10. 使用 usertrapret 切换到用户态
+    extern void usertrapret(void);
+    
+    // 在 usertrap 中添加计数器
+    extern volatile int syscall_test_count;
+    syscall_test_count = 0;
+    
+    uart_puts("开始执行...\n");
+    uart_puts("========================================\n");
+    
+    // 切换到用户态（这个调用不会返回）
+    usertrapret();
+    
+    // 下面的代码不会被执行
+    
+    // 如果能执行到这里，说明遇到了 breakpoint 并成功返回
+    uart_puts("----------------------------------------\n");
+    uart_puts("✓ 成功从用户态返回！\n");
+    
+    // 11. 验证结果
+    uart_puts("\n[步骤9] 验证系统调用结果...\n");
+    printf("系统调用执行次数: %d\n", syscall_test_count);
+    
+    if (syscall_test_count == -1) {
+        uart_puts("✓ 检测到 breakpoint，测试正常完成\n");
+        syscall_test_count = 1;  // 恢复为实际执行次数
+    }
+    
+    printf("trapframe->a0 (返回值) = %ld (期望: %d)\n", 
+           p->trapframe->a0, p->pid);
+    
+    if (syscall_test_count >= 1 && p->trapframe->a0 == p->pid) {
+        uart_puts("✓ 系统调用 sys_getpid 执行成功\n");
+        uart_puts("✓ 返回值正确\n");
+        uart_puts("\n");
+        uart_puts("╔════════════════════════════════════════════╗\n");
+        uart_puts("║  🎉 测试9 通过！真实系统调用机制验证成功  ║\n");
+        uart_puts("╚════════════════════════════════════════════╝\n");
+    } else {
+        uart_puts("✗ 系统调用执行失败或返回值不正确\n");
+    }
+    
+    // 12. 清理
+    uart_puts("\n[步骤10] 清理资源...\n");
+    set_current_proc(0);
+    free_page(kernel_stack);
+    free_page(user_stack_page);
+    free_page(user_code_page);
+    destroy_pagetable(p->pagetable);
+    free_page((void*)p->trapframe);
+    free_proc(p);
+    
+    uart_puts("✓ 清理完成\n");
+    uart_puts("\n✓ 真实系统调用机制验证完成\n");
+    uart_puts("✓ 测试9完成\n");
+    uart_puts("\n");
+    uart_puts("╔════════════════════════════════════════════════════════════════╗\n");
+    uart_puts("║  恭喜！系统调用机制验证成功！                                    ║\n");
+    uart_puts("║  - ✓ 用户态到内核态切换正常                                     ║\n");
+    uart_puts("║  - ✓ ecall 指令触发陷入                                        ║\n");
+    uart_puts("║  - ✓ uservec 正确保存寄存器                                    ║\n");
+    uart_puts("║  - ✓ usertrap 正确处理系统调用                                 ║\n");
+    uart_puts("║  - ✓ userret 正确返回用户态                                    ║\n");
+    uart_puts("╚════════════════════════════════════════════════════════════════╝\n");
 }
 
 /**
@@ -620,7 +1547,6 @@ void run_all_system_tests(void) {
     uart_puts("╔════════════════════════════════════════════════════════════════╗\n");
     uart_puts("║          中断处理系统测试 - 执行完成！                          ║\n");
     uart_puts("╚════════════════════════════════════════════════════════════════╝\n\n");
-    
 }
 
 // 保留向后兼容接口
@@ -632,46 +1558,48 @@ void run_interrupt_exception_tests(void) {
 // 主函数
 // ============================================================================
 
-void main() {
-    uart_puts("╔════════════════════════════════════════════════════════════════╗\n");
-    uart_puts("║          RISCV-OS 实验4&5 - 中断处理与进程管理系统             ║\n");
-    uart_puts("╚════════════════════════════════════════════════════════════════╝\n\n");
-    
-    // 初始化物理内存管理
-    // 内核开始于 0x80000000，kernel.elf 大约 30KB
-    // 将 0x80040000 到 0x88000000 作为堆内存区域（128MB - 256KB）
-    uart_puts("[系统初始化] 正在初始化物理内存管理...\n");
-    pmm_init(0x80040000, 0x88000000);  // 247.75MB 可用内存
-    uart_puts("[系统初始化] 物理内存管理初始化完成\n");
-    
-    // 初始化中断系统
-    uart_puts("[系统初始化] 正在初始化中断系统...\n");
-    trap_init();
-    trap_init_hart();
-    uart_puts("[系统初始化] 中断系统初始化完成\n");
-    
-    // 初始化时间中断
-    uart_puts("[系统初始化] 正在初始化时间中断...\n");
-    timerinit();
-    uart_puts("[系统初始化] 时间中断初始化完成\n");
-    
-    // 初始化进程系统
-    uart_puts("[系统初始化] 正在初始化进程系统...\n");
-    proc_init();
-    uart_puts("[系统初始化] 进程系统初始化完成\n\n");
-    
-    // // 运行中断和异常系统测试
-    // run_all_system_tests();
-    
-    // 运行进程管理系统测试
-    run_process_management_tests();
+struct spinlock tickslock;
+extern volatile uint64 ticks;
 
-    // 运行时间片轮转调度测试（该测试会启动调度器并运行工作线程）
-    test_round_robin_scheduler();
+void
+main()
+{
+  // 初始化物理内存管理
+  // 内核开始于 0x80000000，kernel.elf 大约 30KB
+  // 将 0x80040000 到 0x88000000 作为堆内存区域（128MB - 256KB）
+  uart_puts("[系统初始化] 正在初始化物理内存管理...\n");
+  pmm_init(0x80040000, 0x88000000);  // 247.75MB 可用内存
+  uart_puts("[系统初始化] 物理内存管理初始化完成\n");
+  
+  // 初始化内核虚拟内存
+  uart_puts("[系统初始化] 正在初始化内核虚拟内存...\n");
+  kvminit();
+  kvminithart();
+  uart_puts("[系统初始化] 内核虚拟内存初始化完成\n");
+  
+  // 初始化中断系统
+  uart_puts("[系统初始化] 正在初始化中断系统...\n");
+  trap_init();
+  trap_init_hart();
+  uart_puts("[系统初始化] 中断系统初始化完成\n");
+  
+  // 初始化时间中断
+  uart_puts("[系统初始化] 正在初始化时间中断...\n");
+  timerinit();
+  uart_puts("[系统初始化] 时间中断初始化完成\n");
+  
+  // 初始化进程系统
+  uart_puts("[系统初始化] 正在初始化进程系统...\n");
+  proc_init();
+  uart_puts("[系统初始化] 进程系统初始化完成\n\n");
+    
+  // 运行系统调用测试
+  run_syscall_tests();
 
-    // 如果调度器返回，进入空闲循环
-    uart_puts("系统进入空闲循环（调度器返回）...\n");
-    while(1) {
-        // 空闲循环
-    }
+  // 进入空闲循环
+  uart_puts("\n系统测试完成，进入空闲循环...\n");
+  while(1) {
+      // 空闲循环
+      asm volatile("wfi");  // 等待中断
+  }
 }

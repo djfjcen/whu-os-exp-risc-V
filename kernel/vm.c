@@ -888,3 +888,105 @@ void test_page_replacement(void) {
     
     uart_puts("Page replacement test completed.\n");
 }
+
+// Copy from kernel to user.
+// Copy len bytes from src to virtual address dstva in a given page table.
+// Return 0 on success, -1 on error.
+int
+copyout(pagetable_t pagetable, uint64_t dstva, char *src, uint64_t len)
+{
+  uint64_t n, va0, pa0;
+
+  while(len > 0){
+    va0 = PGROUNDDOWN(dstva);
+    // TODO: 完整实现需要通过页表转换虚拟地址到物理地址
+    // 这里是简化版本，假设直接映射
+    pa0 = dstva;
+    
+    n = PAGE_SIZE - (dstva - va0);
+    if(n > len)
+      n = len;
+    
+    // 直接内存拷贝（简化实现）
+    char *dst = (char*)dstva;
+    for(uint64_t i = 0; i < n; i++)
+      dst[i] = src[i];
+
+    len -= n;
+    src += n;
+    dstva = va0 + PAGE_SIZE;
+  }
+  return 0;
+}
+
+// Copy from user to kernel.
+// Copy len bytes to dst from virtual address srcva in a given page table.
+// Return 0 on success, -1 on error.
+int
+copyin(pagetable_t pagetable, char *dst, uint64_t srcva, uint64_t len)
+{
+  uint64_t n, va0, pa0;
+
+  while(len > 0){
+    va0 = PGROUNDDOWN(srcva);
+    // TODO: 完整实现需要通过页表转换
+    pa0 = srcva;
+    
+    n = PAGE_SIZE - (srcva - va0);
+    if(n > len)
+      n = len;
+    
+    // 直接内存拷贝（简化实现）
+    char *src = (char*)srcva;
+    for(uint64_t i = 0; i < n; i++)
+      dst[i] = src[i];
+
+    len -= n;
+    dst += n;
+    srcva = va0 + PAGE_SIZE;
+  }
+  return 0;
+}
+
+// Copy a null-terminated string from user to kernel.
+// Copy bytes to dst from virtual address srcva in a given page table,
+// until a '\0', or max.
+// Return 0 on success, -1 on error.
+int
+copyinstr(pagetable_t pagetable, char *dst, uint64_t srcva, uint64_t max)
+{
+  uint64_t n, va0, pa0;
+  int got_null = 0;
+
+  while(got_null == 0 && max > 0){
+    va0 = PGROUNDDOWN(srcva);
+    // TODO: 完整实现需要通过页表转换
+    pa0 = srcva;
+    
+    n = PAGE_SIZE - (srcva - va0);
+    if(n > max)
+      n = max;
+
+    char *src = (char*)srcva;
+    while(n > 0){
+      if(*src == '\0'){
+        *dst = '\0';
+        got_null = 1;
+        break;
+      } else {
+        *dst = *src;
+      }
+      --n;
+      --max;
+      src++;
+      dst++;
+    }
+
+    srcva = va0 + PAGE_SIZE;
+  }
+  if(got_null){
+    return 0;
+  } else {
+    return -1;
+  }
+}

@@ -25,10 +25,12 @@ KERNEL_OBJS = kernel/boot/entry.o \
               kernel/vm.o \
               kernel/trap.o \
               kernel/proc.o \
+              kernel/syscall.o \
               kernel/machinevec.o \
               kernel/kernelvec.o \
               kernel/uservec.o \
-              kernel/swtch.o
+              kernel/swtch.o \
+              kernel/user_test.o
 
 # 默认目标
 .PHONY: all clean qemu
