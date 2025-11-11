@@ -1,6 +1,4 @@
-# swtch.S - RISC-V 上下文切换
-# 参考xv6的swtch.S实现
-# 进行两个进程之间的上下文切换
+
 
 .section .text
 .align 4
@@ -12,22 +10,6 @@
 # a1 = new context pointer
 
 switch_context:
-    # 在old上下文中保存被调用者保存的寄存器
-    # struct context布局 (每个字段8字节):
-    # +0:   ra (x1)
-    # +8:   sp (x2)
-    # +16:  s0 (x8)
-    # +24:  s1 (x9)
-    # +32:  s2 (x18)
-    # +40:  s3 (x19)
-    # +48:  s4 (x20)
-    # +56:  s5 (x21)
-    # +64:  s6 (x22)
-    # +72:  s7 (x23)
-    # +80:  s8 (x24)
-    # +88:  s9 (x25)
-    # +96:  s10 (x26)
-    # +104: s11 (x27)
     
     # 保存ra (返回地址)
     sd x1, 0(a0)

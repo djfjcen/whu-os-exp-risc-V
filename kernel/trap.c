@@ -428,7 +428,6 @@ void usertrap(void) {
 void handle_timer_interrupt(void) {
     printf("[timer] Timer interrupt: ticks=%ld\n", ticks);
     
-    // 设置抢占标志，让调度器在适当时候进行进程切换
     extern volatile int need_resched;
     need_resched = 1;
 }

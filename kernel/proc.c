@@ -3,11 +3,9 @@
 #include "uart.h"
 #include "defs.h"
 
-// 前向声明
 extern volatile uint64 ticks;
 uint64 get_ticks(void);
 
-// 手动实现memset和memcpy（因为我们没有链接libc）
 static void* memset_impl(void *s, int c, unsigned long n) {
     char *p = (char *)s;
     for (unsigned long i = 0; i < n; i++) {
@@ -69,6 +67,7 @@ void proc_init(void) {
         proc[i].state = UNUSED;
         proc[i].pid = 0;
         proc[i].ppid = 0;
+        proc[i].uid = 0;
     }
     
     uart_puts("[proc] Process system initialized\n");
@@ -86,43 +85,64 @@ struct proc* alloc_proc(void) {
     for (int i = 0; i < NPROC; i++) {
         if (proc[i].state == UNUSED) {
             p = &proc[i];
-            p->state = USED;
-            p->pid = nextpid++;
-            p->ppid = 0;
-            p->killed = 0;
-            p->xstate = 0;
-            
-            // 分配陷阱帧
-            p->trapframe = alloc_trapframe();
-            if (!p->trapframe) {
-                uart_puts("[proc] Failed to allocate trapframe\n");
-                spin_unlock(&proc_lock);
-                return 0;
-            }
-            
-            // 分配内核栈 (4KB)
-            p->kstack = (char *)alloc_page();
-            if (!p->kstack) {
-                uart_puts("[proc] Failed to allocate kernel stack\n");
-                free_trapframe(p->trapframe);
-                spin_unlock(&proc_lock);
-                return 0;
-            }
-            
-            // 初始化上下文
-            memset(&p->context, 0, sizeof(p->context));
-            p->context.sp = (uint64)p->kstack + PAGE_SIZE;  // 栈顶
-            
-            printf("[proc] Allocated process: pid=%d\n", p->pid);
-            
-            spin_unlock(&proc_lock);
-            return p;
+            goto found;
         }
     }
     
     spin_unlock(&proc_lock);
     uart_puts("[proc] No free process slot\n");
     return 0;
+
+found:
+    p->state = USED;
+    p->pid = nextpid++;
+    p->ppid = 0;
+    p->uid = 0;              // 默认为root用户(uid=0)
+    p->killed = 0;
+    p->xstate = 0;
+    p->parent = 0;
+    p->chan = 0;
+    p->sz = 0;
+    
+    spin_unlock(&proc_lock);
+    
+    // 分配trapframe
+    p->trapframe = alloc_trapframe();
+    if (!p->trapframe) {
+        uart_puts("[proc] Failed to allocate trapframe\n");
+        p->state = UNUSED;
+        return 0;
+    }
+    
+    // 分配内核栈 (4KB)
+    p->kstack = (char *)alloc_page();
+    if (!p->kstack) {
+        uart_puts("[proc] Failed to allocate kernel stack\n");
+        free_trapframe(p->trapframe);
+        p->state = UNUSED;
+        return 0;
+    }
+    
+    // 清零内核栈
+    memset(p->kstack, 0, PAGE_SIZE);
+    
+    // 初始化上下文
+    memset(&p->context, 0, sizeof(p->context));
+    p->context.sp = (uint64)p->kstack + PAGE_SIZE;  // 栈顶
+    
+    // 创建用户页表
+    p->pagetable = proc_pagetable(p);
+    if (p->pagetable == 0) {
+        uart_puts("[proc] Failed to create user pagetable\n");
+        free_page(p->kstack);
+        free_trapframe(p->trapframe);
+        p->state = UNUSED;
+        return 0;
+    }
+    
+    printf("[proc] Allocated process: pid=%d\n", p->pid);
+    
+    return p;
 }
 
 /**
@@ -130,8 +150,6 @@ struct proc* alloc_proc(void) {
  */
 void free_proc(struct proc *p) {
     if (!p) return;
-    
-    spin_lock(&proc_lock);
     
     if (p->trapframe) {
         free_trapframe(p->trapframe);
@@ -144,14 +162,18 @@ void free_proc(struct proc *p) {
     }
     
     if (p->pagetable) {
-        destroy_pagetable(p->pagetable);
+        proc_freepagetable(p->pagetable, p->sz);
         p->pagetable = 0;
     }
     
-    p->state = UNUSED;
+    p->sz = 0;
     p->pid = 0;
-    
-    spin_unlock(&proc_lock);
+    p->ppid = 0;
+    p->parent = 0;
+    p->chan = 0;
+    p->killed = 0;
+    p->xstate = 0;
+    p->state = UNUSED;
 }
 
 /**
@@ -227,6 +249,152 @@ struct proc* get_current_proc(void) {
  */
 void set_current_proc(struct proc *p) {
     current_proc = p;
+}
+
+/**
+ * 获取当前进程的UID
+ */
+int get_uid(void) {
+    if (current_proc) {
+        return current_proc->uid;
+    }
+    return 0;  // 默认返回root
+}
+
+/**
+ * 设置当前进程的UID（需要权限检查）
+ */
+int set_uid(int uid) {
+    if (!current_proc) {
+        return -1;
+    }
+    
+    // 简化版：只有root(uid=0)可以修改UID
+    if (current_proc->uid != 0) {
+        printf("[proc] Permission denied: only root can change UID\n");
+        return -1;
+    }
+    
+    if (uid < 0 || uid >= NUSER) {
+        printf("[proc] Invalid UID: %d (must be 0-%d)\n", uid, NUSER-1);
+        return -1;
+    }
+    
+    current_proc->uid = uid;
+    printf("[proc] Changed UID to %d for process %d\n", uid, current_proc->pid);
+    return 0;
+}
+
+/**
+ * 统计指定用户的进程数
+ */
+int count_user_procs(int uid) {
+    int count = 0;
+    
+    spin_lock(&proc_lock);
+    for (int i = 0; i < NPROC; i++) {
+        if (proc[i].state != UNUSED && proc[i].uid == uid) {
+            count++;
+        }
+    }
+    spin_unlock(&proc_lock);
+    
+    return count;
+}
+
+/**
+ * 检查用户是否可以fork（是否达到进程数上限）
+ */
+int can_fork(int uid) {
+    int count = count_user_procs(uid);
+    
+    if (count >= MAX_PROC_PER_USER) {
+        printf("[proc] Fork denied: user %d has %d processes (max %d)\n", 
+               uid, count, MAX_PROC_PER_USER);
+        return 0;
+    }
+    
+    return 1;
+}
+
+/**
+ * 为进程分配并初始化用户栈
+ * 分配PAGE_SIZE字节作为用户栈
+ */
+int setup_user_stack(struct proc *p) {
+    if (!p || !p->pagetable) {
+        return -1;
+    }
+    
+    // 分配用户栈（在用户空间高地址）
+    // 注意：trampoline和trapframe占据最高的两页
+    uint64_t trampoline_va = (1L << 38) - PAGE_SIZE;
+    uint64_t trapframe_va = trampoline_va - PAGE_SIZE;
+    uint64_t stack_top = trapframe_va;
+    uint64_t stack_base = stack_top - PAGE_SIZE;
+    
+    // 分配栈内存
+    char* mem = (char*)alloc_page();
+    if (mem == 0) {
+        return -1;
+    }
+    
+    // 清零栈
+    memset(mem, 0, PAGE_SIZE);
+    
+    // 映射栈页面到用户地址空间
+    if (map_page(p->pagetable, stack_base, (uint64_t)mem, 
+                 PTE_R | PTE_W | PTE_U) != 0) {
+        free_page(mem);
+        return -1;
+    }
+    
+    // 设置栈指针（栈从高地址向低地址增长）
+    p->ustack = stack_top;
+    
+    return 0;
+}
+
+/**
+ * 加载简单的用户程序到进程
+ * code: 用户代码
+ * sz: 代码大小
+ */
+int load_user_program(struct proc *p, void* code, uint64_t sz) {
+    if (!p || !code || sz == 0) {
+        return -1;
+    }
+    
+    // 分配足够的用户内存来存放代码
+    uint64_t oldsz = p->sz;
+    uint64_t newsz = uvmalloc(p->pagetable, oldsz, oldsz + sz);
+    if (newsz == 0) {
+        return -1;
+    }
+    p->sz = newsz;
+    
+    // 复制代码到用户内存
+    if (copyout(p->pagetable, 0, (char*)code, sz) < 0) {
+        uvmdealloc(p->pagetable, newsz, oldsz);
+        p->sz = oldsz;
+        return -1;
+    }
+    
+    // 设置用户栈
+    if (setup_user_stack(p) < 0) {
+        uvmdealloc(p->pagetable, newsz, oldsz);
+        p->sz = oldsz;
+        return -1;
+    }
+    
+    // 初始化trapframe
+    if (p->trapframe) {
+        memset(p->trapframe, 0, sizeof(struct trapframe));
+        p->trapframe->sepc = 0;  // 程序从地址0开始
+        p->trapframe->sp = p->ustack;  // 用户栈指针
+    }
+    
+    return 0;
 }
 
 // 调度器的上下文 (调度器本身的执行状态)
@@ -310,10 +478,9 @@ void yield(void) {
     struct proc *p = current_proc;
     if (!p) return;
     
-    // 保存当前的中断状态
     int was_intr_on = intr_get();
     
-    intr_off();  // 关闭中断以保护
+    intr_off();
     
     spin_lock(&proc_lock);
     if (p->state == RUNNING) {
@@ -323,12 +490,9 @@ void yield(void) {
     
     printf("[proc] Process %d yielding CPU\n", p->pid);
     
-    // 上下文切换: 当前进程context -> scheduler context
-    // switch_context保存当前进程的context，恢复scheduler的context
-    // 这会回到scheduler()函数中的switch_context调用之后
+    // switch_context保存当前进程的context，恢复scheduler的context，这会回到scheduler()函数中的switch_context调用之后
     switch_context(&p->context, &scheduler_context);
     
-    // 当这个进程再次被调度时，会从这里继续执行
     // 恢复到调用yield()时的中断状态
     if (was_intr_on) {
         intr_on();
@@ -337,13 +501,19 @@ void yield(void) {
 
 /**
  * 创建子进程 (fork系统调用)
- * 简化实现：仅分配进程，不复制内存
+ * 复制父进程的内存、寄存器状态等
+ * 父进程返回子进程PID，子进程返回0
  */
 int fork(void) {
     struct proc *p = current_proc;
     if (!p) {
         uart_puts("[proc] fork: no current process\n");
         return -1;
+    }
+    
+    // 检查用户进程数限制
+    if (!can_fork(p->uid)) {
+        return -1;  // 已打印错误消息
     }
     
     // 分配新进程
@@ -353,34 +523,73 @@ int fork(void) {
         return -1;
     }
     
+    // 继承父进程的UID
+    np->uid = p->uid;
+    
+    // 复制父进程的内存内容到子进程
+    if (uvmcopy(p->pagetable, np->pagetable, p->sz) < 0) {
+        uart_puts("[proc] fork: failed to copy memory\n");
+        free_proc(np);
+        return -1;
+    }
+    np->sz = p->sz;
+    
     // 设置父子关系
+    spin_lock(&proc_lock);
     np->parent = p;
     np->ppid = p->pid;
+    spin_unlock(&proc_lock);
     
-    // 简化：复制页表（实际应该使用写时复制）
-    if (p->pagetable) {
-        np->pagetable = create_pagetable();
-        if (!np->pagetable) {
-            free_proc(np);
-            return -1;
-        }
-        // TODO: 复制内存内容
-    }
-    
-    // 复制陷阱帧（用于返回值）
+    // 复制trapframe（保存所有寄存器状态）
     if (p->trapframe && np->trapframe) {
         memcpy(np->trapframe, p->trapframe, sizeof(struct trapframe));
-        // 子进程的返回值应该是0
+        // 子进程的返回值设为0
         np->trapframe->a0 = 0;
     }
     
-    // 标记为可运行
-    np->state = RUNNABLE;
+    // 复制打开的文件描述符（简化版：暂不实现）
+    // 复制工作目录（简化版：暂不实现）
     
-    printf("[proc] fork: created process %d (parent %d)\n", np->pid, p->pid);
+    // 将子进程标记为RUNNABLE
+    spin_lock(&proc_lock);
+    np->state = RUNNABLE;
+    spin_unlock(&proc_lock);
+    
+    printf("[proc] fork: created process %d (parent %d, uid %d)\n", 
+           np->pid, p->pid, np->uid);
     
     // 父进程返回子进程PID
     return np->pid;
+}
+
+/**
+ * 增长或收缩用户内存 (sbrk系统调用的底层实现)
+ * n > 0: 增长n字节
+ * n < 0: 收缩-n字节
+ * 返回旧的大小，失败返回-1
+ */
+int growproc(int n) {
+    uint64_t sz;
+    struct proc *p = current_proc;
+    
+    if (!p) {
+        return -1;
+    }
+    
+    sz = p->sz;
+    
+    if (n > 0) {
+        // 增长内存
+        if ((sz = uvmalloc(p->pagetable, sz, sz + n)) == 0) {
+            return -1;
+        }
+    } else if (n < 0) {
+        // 收缩内存
+        sz = uvmdealloc(p->pagetable, sz, sz + n);
+    }
+    
+    p->sz = sz;
+    return 0;
 }
 
 /**

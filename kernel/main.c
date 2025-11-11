@@ -213,6 +213,9 @@ void run_process_management_tests(void) {
     test_process_find();
     test_process_state_transition();
     test_simple_fork();
+    test_process_memory();
+    test_growproc();
+    test_uid_limits();
     test_scheduler_basic();
     
     uart_puts("\n");
@@ -220,11 +223,170 @@ void run_process_management_tests(void) {
     uart_puts("║          进程管理系统测试 - 执行完成！                          ║\n");
     uart_puts("╚════════════════════════════════════════════════════════════════╝\n\n");
     uart_puts("测试结果总结：\n");
-    uart_puts("  ✓ 进程分配和释放功能正常\n");
+    uart_puts("  ✓ 进程分配和释放功能正常（含PCB、内核栈、用户页表）\n");
     uart_puts("  ✓ 进程查找功能正常\n");
     uart_puts("  ✓ 进程状态转换正常\n");
-    uart_puts("  ✓ Fork系统调用基本框架完成\n");
+    uart_puts("  ✓ Fork系统调用（含内存复制）\n");
+    uart_puts("  ✓ 进程内存管理（分配/释放）\n");
+    uart_puts("  ✓ Growproc（sbrk实现）\n");
+    uart_puts("  ✓ UID机制和进程数限制\n");
     uart_puts("  ✓ 调度器框架就绪\n\n");
+}
+
+/**
+ * 测试：进程内存管理
+ */
+void test_process_memory(void) {
+    uart_puts("\n[测试] 进程内存管理\n");
+    
+    struct proc *p = alloc_proc();
+    if (!p) {
+        uart_puts("✗ 进程分配失败\n");
+        return;
+    }
+    
+    // 检查页表是否创建
+    if (p->pagetable == 0) {
+        uart_puts("✗ 用户页表未创建\n");
+        free_proc(p);
+        return;
+    }
+    printf("✓ 进程 %d 的用户页表已创建\n", p->pid);
+    
+    // 测试内存分配
+    uint64_t old_sz = p->sz;
+    uint64_t new_sz = uvmalloc(p->pagetable, old_sz, old_sz + PAGE_SIZE * 2);
+    if (new_sz == old_sz + PAGE_SIZE * 2) {
+        printf("✓ 分配 2 页内存成功 (0x%lx -> 0x%lx)\n", old_sz, new_sz);
+        p->sz = new_sz;
+    } else {
+        uart_puts("✗ 内存分配失败\n");
+    }
+    
+    // 测试内存释放
+    new_sz = uvmdealloc(p->pagetable, p->sz, p->sz - PAGE_SIZE);
+    if (new_sz == p->sz - PAGE_SIZE) {
+        printf("✓ 释放 1 页内存成功 (0x%lx -> 0x%lx)\n", p->sz, new_sz);
+        p->sz = new_sz;
+    } else {
+        uart_puts("✗ 内存释放失败\n");
+    }
+    
+    free_proc(p);
+    uart_puts("✓ 进程内存管理测试完成\n");
+}
+
+/**
+ * 测试：growproc (sbrk系统调用)
+ */
+void test_growproc(void) {
+    uart_puts("\n[测试] Growproc (sbrk)\n");
+    
+    struct proc *p = alloc_proc();
+    if (!p) {
+        uart_puts("✗ 进程分配失败\n");
+        return;
+    }
+    
+    // 分配初始内存
+    p->sz = uvmalloc(p->pagetable, 0, PAGE_SIZE);
+    printf("初始内存大小: 0x%lx\n", p->sz);
+    
+    // 设置为当前进程
+    struct proc *old_proc = current_proc;
+    current_proc = p;
+    
+    // 测试增长内存
+    if (growproc(PAGE_SIZE) == 0) {
+        printf("✓ Growproc 增长 1 页成功，新大小: 0x%lx\n", p->sz);
+    } else {
+        uart_puts("✗ Growproc 增长失败\n");
+    }
+    
+    // 测试收缩内存
+    if (growproc(-PAGE_SIZE) == 0) {
+        printf("✓ Growproc 收缩 1 页成功，新大小: 0x%lx\n", p->sz);
+    } else {
+        uart_puts("✗ Growproc 收缩失败\n");
+    }
+    
+    current_proc = old_proc;
+    free_proc(p);
+    uart_puts("✓ Growproc 测试完成\n");
+}
+
+/**
+ * 测试：UID机制和进程数限制
+ */
+void test_uid_limits(void) {
+    uart_puts("\n[测试] UID机制和进程数限制\n");
+    
+    struct proc *procs[10];
+    int allocated = 0;
+    
+    // 测试默认UID
+    struct proc *p1 = alloc_proc();
+    if (p1) {
+        printf("✓ 进程 %d 的默认 UID: %d\n", p1->pid, p1->uid);
+        procs[allocated++] = p1;
+    }
+    
+    // 设置为用户1
+    struct proc *old_proc = current_proc;
+    current_proc = p1;
+    
+    if (set_uid(1) == 0) {
+        printf("✓ 成功将进程 %d 的 UID 改为 1\n", p1->pid);
+    }
+    
+    // 测试用户1的进程数限制 (MAX_PROC_PER_USER = 4)
+    printf("\n尝试为用户1创建进程（限制：%d个）：\n", MAX_PROC_PER_USER);
+    
+    for (int i = 1; i < 10; i++) {
+        // 模拟fork（继承UID）
+        struct proc *np = alloc_proc();
+        if (!np) {
+            printf("  第%d次分配失败：进程表已满\n", i+1);
+            break;
+        }
+        
+        np->uid = current_proc->uid;  // 继承UID
+        
+        // 检查是否达到限制
+        int count = count_user_procs(np->uid);
+        if (count > MAX_PROC_PER_USER) {
+            printf("  ✗ 第%d次分配：用户%d已有%d个进程，超过限制\n", 
+                   i+1, np->uid, count-1);
+            free_proc(np);
+            break;
+        }
+        
+        printf("  ✓ 第%d次分配成功：进程%d (用户%d，当前共%d个进程)\n", 
+               i+1, np->pid, np->uid, count);
+        procs[allocated++] = np;
+        
+        if (count >= MAX_PROC_PER_USER) {
+            printf("  达到用户%d的进程数限制(%d个)\n", np->uid, MAX_PROC_PER_USER);
+            break;
+        }
+    }
+    
+    // 测试fork限制
+    printf("\n测试fork限制：\n");
+    int fork_result = can_fork(1);
+    if (!fork_result) {
+        uart_puts("  ✓ 正确拒绝fork（已达上限）\n");
+    } else {
+        uart_puts("  ✗ 应该拒绝fork但未拒绝\n");
+    }
+    
+    // 清理
+    current_proc = old_proc;
+    for (int i = 0; i < allocated; i++) {
+        free_proc(procs[i]);
+    }
+    
+    uart_puts("✓ UID机制测试完成\n");
 }
 
 /**

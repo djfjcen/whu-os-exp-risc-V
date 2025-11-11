@@ -39,6 +39,21 @@ void dump_pagetable(pagetable_t pt, int level);
 void kvminit(void);
 void kvminithart(void);
 
+// 用户进程页表管理函数声明
+struct proc;  // 前向声明
+pagetable_t proc_pagetable(struct proc* p);
+void proc_freepagetable(pagetable_t pagetable, uint64_t sz);
+uint64_t uvmalloc(pagetable_t pagetable, uint64_t oldsz, uint64_t newsz);
+uint64_t uvmdealloc(pagetable_t pagetable, uint64_t oldsz, uint64_t newsz);
+void uvmunmap(pagetable_t pagetable, uint64_t va, uint64_t npages, int do_free);
+void uvmfree(pagetable_t pagetable, uint64_t sz);
+int uvmcopy(pagetable_t old, pagetable_t new, uint64_t sz);
+void freewalk(pagetable_t pagetable);
+uint64_t walkaddr(pagetable_t pagetable, uint64_t va);
+int copyin(pagetable_t pagetable, char* dst, uint64_t srcva, uint64_t len);
+int copyout(pagetable_t pagetable, uint64_t dstva, char* src, uint64_t len);
+
+
 // 页面替换系统函数声明
 void init_page_replacement(void);
 int handle_page_fault(pagetable_t pt, uint64_t va, int perm);

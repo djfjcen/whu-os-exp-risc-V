@@ -8,6 +8,10 @@
 // 进程最大数量
 #define NPROC 16
 
+// 用户相关限制
+#define NUSER 8              // 最大用户数
+#define MAX_PROC_PER_USER 4  // 每个用户最多进程数
+
 // 进程状态定义
 enum procstate {
     UNUSED,      // 未使用
@@ -19,7 +23,6 @@ enum procstate {
 };
 
 // 上下文切换结构 - 保存需要在上下文切换时保存的寄存器
-// 参考xv6: 只保存被调用者保存的寄存器 (被调用者必须保存)
 struct context {
     uint64 ra;      // 返回地址 (x1)
     uint64 sp;      // 栈指针 (x2)
@@ -43,6 +46,7 @@ struct proc {
     enum procstate state;    // 进程状态
     int pid;                 // 进程ID
     int ppid;                // 父进程ID
+    int uid;                 // 用户ID (新增)
     int xstate;              // 退出状态
     int killed;              // 是否被kill标记
     
@@ -101,11 +105,22 @@ int fork(void);                    // 创建子进程
 void exit(int status);             // 进程退出
 int wait(int *status);             // 等待子进程
 void kill(int pid);                // 杀死进程
+int growproc(int n);               // 增长或收缩进程内存
+
+// 用户程序加载
+int setup_user_stack(struct proc *p);  // 设置用户栈
+int load_user_program(struct proc *p, void* code, uint64_t sz);  // 加载用户程序
 
 // 进程工具函数
 int get_pid(void);                 // 获取当前进程PID
 struct proc* get_current_proc(void);  // 获取当前进程结构
 void set_current_proc(struct proc *p);  // 设置当前进程
+
+// UID 相关函数
+int get_uid(void);                 // 获取当前进程UID
+int set_uid(int uid);              // 设置当前进程UID
+int count_user_procs(int uid);     // 统计指定用户的进程数
+int can_fork(int uid);             // 检查用户是否可以fork
 
 // 进程睡眠/唤醒
 void sleep(void *chan);            // 睡眠直到被唤醒
