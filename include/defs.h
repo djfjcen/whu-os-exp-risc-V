@@ -83,5 +83,25 @@ void trap_init(void);
 void trap_init_hart(void);
 void proc_init(void);
 void scheduler(void);
+uint64_t get_ticks(void);                     // 获取系统 ticks
+
+// 系统调用相关函数声明 - 参考 xv6
+void syscall(void);                           // 系统调用分发器
+int argint(int n, int *ip);                   // 获取整数参数
+int argaddr(int n, uint64_t *ip);             // 获取地址参数
+int argstr(int n, char *buf, int max);        // 获取字符串参数
+int argraw(int n, uint64_t *ip);              // 获取原始参数
+int fetchstr(uint64_t addr, char *buf, int max);  // 从用户空间获取字符串
+int copyinstr(pagetable_t pagetable, char *dst, uint64_t srcva, uint64_t max);  // 复制用户空间字符串
+
+// 进程管理函数 - 参考 xv6
+struct proc* myproc(void);                    // 获取当前进程
+int fork(void);                               // 创建子进程
+void exit(int status);                        // 退出进程
+int wait(uint64_t addr);                      // 等待子进程
+void yield(void);                             // 让出CPU
+int kill(int pid);                            // 杀死进程
+void usertrapret(void);                       // 返回用户空间
 
 #endif
+

@@ -6,8 +6,11 @@
 .section .text
 .align 4
 .global uservec
+.global trampoline
 .type uservec, @function
 
+# trampoline 页的开始（包含 uservec 和 userret）
+trampoline:
 uservec:
     # 用户态中断处理流程:
     # 1. 在用户空间中，我们不能直接使用内核栈

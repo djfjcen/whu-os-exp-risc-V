@@ -49,6 +49,7 @@ struct proc {
     int uid;                 // 用户ID (新增)
     int xstate;              // 退出状态
     int killed;              // 是否被kill标记
+    char name[16];           // 进程名称（参考 xv6）
     
     // 内存管理
     pagetable_t pagetable;   // 用户页表
@@ -103,8 +104,8 @@ void switch_context(struct context *old, struct context *new);  // 上下文切�
 // 进程生命周期管理
 int fork(void);                    // 创建子进程
 void exit(int status);             // 进程退出
-int wait(int *status);             // 等待子进程
-void kill(int pid);                // 杀死进程
+int wait(uint64_t addr);           // 等待子进程 (参考 xv6，参数是地址)
+int kill(int pid);                 // 杀死进程 (参考 xv6，返回 int)
 int growproc(int n);               // 增长或收缩进程内存
 
 // 用户程序加载

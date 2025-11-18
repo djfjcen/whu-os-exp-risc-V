@@ -311,9 +311,8 @@ void handle_exception(struct trapframe *tf) {
     
     switch (scause) {
         case EXCP_UENV_CALL:  // 用户系统调用 (ecall)
-            // 调用系统调用处理函数
-            handle_syscall(tf);
-            // 在 handle_syscall 中负责更新 sepc
+            // 系统调用在 usertrap() 中处理，不应该到这里
+            printf("[trap] Unexpected syscall in handle_exception\n");
             break;
             
         case EXCP_INSTR_PAGE_FAULT:
@@ -378,9 +377,19 @@ void kerneltrap(void) {
 /**
  * 用户态中断处理 - 从uservec.S调用
  * 处理在用户程序执行时发生的中断和异常
+ * 完全参考 xv6 的 usertrap 实现
  */
 void usertrap(void) {
     uint64 scause = r_scause();
+    struct proc *p = myproc();
+    
+    if (p == NULL || p->trapframe == NULL) {
+        printf("usertrap: no process or trapframe\n");
+        return;
+    }
+    
+    // 保存 sepc，因为后续可能会发生进程切换
+    p->trapframe->sepc = r_sepc();
     
     if (scause & (1UL << 63)) {
         // 中断 (异步)
@@ -391,23 +400,46 @@ void usertrap(void) {
         // 异常 (同步)
         switch (scause) {
             case EXCP_UENV_CALL:  // 系统调用
-                uart_puts("[trap] User syscall\n");
-                // TODO: 处理系统调用
-                // 跳过ecall指令
+                // 如果进程被 kill，直接退出
+                if(p->killed)
+                    exit(-1);
+                
+                // sepc 指向 ecall 指令，需要跳过它
+                p->trapframe->sepc += 4;
+                
+                // 启用中断以便系统调用期间可以响应中断
+                intr_on();
+                
+                // 调用系统调用分发器
+                syscall();
                 break;
                 
             case EXCP_INSTR_PAGE_FAULT:
             case EXCP_LOAD_PAGE_FAULT:
             case EXCP_STORE_PAGE_FAULT:
-                uart_puts("[trap] Page fault in user mode\n");
+                printf("[trap] Page fault in user mode at 0x%lx\n", r_stval());
                 // TODO: 页故障处理
+                p->killed = 1;
                 break;
                 
             default:
-                printf("[trap] Unknown exception %d in user mode\n", scause);
+                printf("[trap] Unknown exception %ld in user mode\n", scause);
+                p->killed = 1;
                 break;
         }
     }
+    
+    // 如果进程被 kill，退出
+    if(p->killed)
+        exit(-1);
+    
+    // 返回用户空间前，检查是否需要让出 CPU
+    // （参考 xv6 的抢占机制）
+    if(need_resched)
+        yield();
+    
+    // usertrapret() 会恢复用户进程状态并返回用户空间
+    usertrapret();
 }
 
 /**
@@ -454,53 +486,22 @@ void handle_software_interrupt(void) {
  * 系统调用处理
  * 参数: tf - 用户程序的陷阱帧
  * 
+ * 注意：这个函数已经被 usertrap() 中的 syscall() 调用替代
+ * 保留此函数以保持兼容性
+ * 
  * RISC-V 系统调用约定:
  * - a7 寄存器: 系统调用号
  * - a0-a6 寄存器: 系统调用参数
  * - a0 寄存器: 返回值
  */
 void handle_syscall(struct trapframe *tf) {
-    // 系统调用处理逻辑（暂时空着，为后续实现保留）
-    
+    // 这个函数不再需要，因为系统调用处理已经在 usertrap() 中通过 syscall() 完成
     if (tf == NULL) {
         uart_puts("[error] handle_syscall: trapframe is NULL\n");
         return;
     }
     
-    // 获取系统调用号（在 a7 寄存器中）
-    uint64 syscall_num = tf->a7;
-    
-    printf("[syscall] Syscall #%ld received\n", syscall_num);
-    
-    // 系统调用分发示例
-    switch (syscall_num) {
-        case 0:  // 示例: sys_exit
-            printf("[syscall] sys_exit called\n");
-            // TODO: 实现 exit 系统调用
-            break;
-            
-        case 1:  // 示例: sys_fork
-            printf("[syscall] sys_fork called\n");
-            // TODO: 实现 fork 系统调用
-            break;
-            
-        case 2:  // 示例: sys_read
-            printf("[syscall] sys_read called\n");
-            // TODO: 实现 read 系统调用
-            break;
-            
-        case 3:  // 示例: sys_write
-            printf("[syscall] sys_write called\n");
-            // TODO: 实现 write 系统调用
-            break;
-            
-        default:
-            printf("[syscall] Unknown syscall #%ld\n", syscall_num);
-            break;
-    }
-    
-    // 跳过 ecall 指令（sepc += 4）
-    // 注：在用户程序的陷阱帧中更新 sepc，使其恢复后继续执行 ecall 之后的指令
+    printf("[syscall] handle_syscall called (deprecated, use syscall() instead)\n");
 }
 
 /**
@@ -551,4 +552,38 @@ void handle_breakpoint(struct trapframe *tf) {
     
     printf("[breakpoint] Breakpoint at 0x%lx\n", tf->sepc);
     
+}
+
+/**
+ * 返回用户空间 - 参考 xv6 的 usertrapret
+ * 这个函数会设置好返回用户空间需要的寄存器，然后调用 userret (在 uservec.S 中)
+ */
+void usertrapret(void) {
+    struct proc *p = myproc();
+    
+    if (p == NULL || p->trapframe == NULL) {
+        printf("usertrapret: no process or trapframe\n");
+        return;
+    }
+    
+    // 关闭中断，准备返回用户空间
+    intr_off();
+    
+    // 告诉 trampoline.S 用户空间的页表
+    // 注意：xv6 这里会设置 stvec 指向 uservec，我们简化处理
+    
+    // 恢复用户进程的 sepc（在 trapframe 中保存）
+    w_sepc(p->trapframe->sepc);
+    
+    // 设置 sstatus 准备返回用户模式
+    uint64 sstatus = r_sstatus();
+    sstatus &= ~SSTATUS_SPP;  // 清除 SPP 位，返回用户模式
+    sstatus |= SSTATUS_SPIE;  // 启用用户模式中断
+    w_sstatus(sstatus);
+    
+    // 注意：完整的 xv6 实现会调用 userret (汇编函数) 来恢复所有寄存器
+    // 这里简化处理，假设寄存器已经在 trapframe 中正确保存
+    
+    // TODO: 实现完整的用户空间返回（需要汇编支持）
+    // 现在只是设置好寄存器，实际返回需要 sret 指令
 }

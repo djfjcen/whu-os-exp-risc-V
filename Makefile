@@ -25,6 +25,8 @@ KERNEL_OBJS = kernel/boot/entry.o \
               kernel/vm.o \
               kernel/trap.o \
               kernel/proc.o \
+              kernel/syscall.o \
+              kernel/sysproc.o \
               kernel/machinevec.o \
               kernel/kernelvec.o \
               kernel/uservec.o \

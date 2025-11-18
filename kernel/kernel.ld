@@ -24,8 +24,22 @@ SECTIONS
   /* 数据段 */
   .data : ALIGN(4K) {
     PROVIDE(data_start = .);
-    *(.data .data.*)
+    *(.data)
     *(.sdata .sdata.*)
+    
+    /* 用户程序二进制数据直接放在 .data 段中 */
+    . = ALIGN(16);
+    _binary_user_initcode_start = .;
+    KEEP(*(.data.user_initcode))
+    _binary_user_initcode_end = .;
+    _binary_user_initcode_size = _binary_user_initcode_end - _binary_user_initcode_start;
+    
+    . = ALIGN(16);
+    _binary_user_user_test_start = .;
+    KEEP(*(.data.user_user_test))
+    _binary_user_user_test_end = .;
+    _binary_user_user_test_size = _binary_user_user_test_end - _binary_user_user_test_start;
+    
     PROVIDE(data_end = .);
   }
 

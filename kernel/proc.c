@@ -622,9 +622,10 @@ void exit(int status) {
 }
 
 /**
- * 等待子进程
+ * 等待子进程 - 参考 xv6
+ * addr 是用户空间地址，用于保存子进程的退出状态
  */
-int wait(int *status) {
+int wait(uint64_t addr) {
     struct proc *p = current_proc;
     if (!p) return -1;
     
@@ -646,8 +647,12 @@ int wait(int *status) {
         if (found) {
             // 找到了僵尸子进程
             int pid = zombie->pid;
-            if (status) {
-                *status = zombie->xstate;
+            if (addr != 0) {
+                // 将退出状态复制到用户空间
+                if(copyout(p->pagetable, addr, (char *)&zombie->xstate, sizeof(zombie->xstate)) < 0) {
+                    spin_unlock(&proc_lock);
+                    return -1;
+                }
             }
             
             // 清理进程
@@ -667,8 +672,7 @@ int wait(int *status) {
                 break;
             }
         }
-        
-        if (!has_children) {
+                if (!has_children) {
             spin_unlock(&proc_lock);
             return -1;
         }
@@ -681,18 +685,23 @@ int wait(int *status) {
 }
 
 /**
- * 杀死进程
+ * 杀死进程 - 参考 xv6
+ * 返回 0 表示成功，-1 表示找不到进程
  */
-void kill(int pid) {
+int kill(int pid) {
     struct proc *p = find_proc(pid);
-    if (p) {
-        spin_lock(&proc_lock);
-        p->killed = 1;
-        if (p->state == SLEEPING) {
-            p->state = RUNNABLE;
-        }
-        spin_unlock(&proc_lock);
+    if (!p) {
+        return -1;  // 进程不存在
     }
+    
+    spin_lock(&proc_lock);
+    p->killed = 1;
+    if (p->state == SLEEPING) {
+        p->state = RUNNABLE;
+    }
+    spin_unlock(&proc_lock);
+    
+    return 0;
 }
 
 /**
@@ -744,4 +753,12 @@ void wakeup_one(void *chan) {
     }
     
     spin_unlock(&proc_lock);
+}
+
+/**
+ * 获取当前进程 - 参考 xv6
+ * 返回当前在此 CPU 上运行的进程
+ */
+struct proc* myproc(void) {
+    return current_proc;
 }

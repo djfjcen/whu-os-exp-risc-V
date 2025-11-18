@@ -975,6 +975,49 @@ int copyout(pagetable_t pagetable, uint64_t dstva, char* src, uint64_t len) {
     return 0;
 }
 
+// 复制以 null 结尾的字符串从用户空间到内核空间
+// 参考 xv6: 从用户页表 pagetable 的 srcva 地址复制字符串到 dst
+// 最多复制 max 字节（包括 null 结尾符）
+// 返回复制的字符串长度（包括 null 结尾符），错误时返回 -1
+int copyinstr(pagetable_t pagetable, char *dst, uint64_t srcva, uint64_t max) {
+    uint64_t n, va0, pa0;
+    int got_null = 0;
+    
+    while(got_null == 0 && max > 0) {
+        va0 = PGROUNDDOWN(srcva);
+        pa0 = walkaddr(pagetable, va0);
+        if(pa0 == 0)
+            return -1;
+        
+        n = PAGE_SIZE - (srcva - va0);
+        if(n > max)
+            n = max;
+        
+        char *src = (char *)(pa0 + (srcva - va0));
+        while(n > 0) {
+            if(*src == '\0') {
+                *dst = '\0';
+                got_null = 1;
+                break;
+            } else {
+                *dst = *src;
+            }
+            --n;
+            --max;
+            src++;
+            dst++;
+        }
+        
+        srcva = va0 + PAGE_SIZE;
+    }
+    
+    if(got_null) {
+        return 0;
+    } else {
+        return -1;
+    }
+}
+
 // 取消用户页表的映射，释放对应物理页
 // 从va开始，取消npages个页面的映射
 // do_free为1时释放物理页
