@@ -50,22 +50,17 @@ struct proc {
     int xstate;              // 退出状态
     int killed;              // 是否被kill标记
     
-    // 内存管理
     pagetable_t pagetable;   // 用户页表
     uint64 sz;               // 进程内存大小
     char *kstack;            // 内核栈指针
     
-    // 用户程序执行状态
     struct trapframe *trapframe;  // 用户陷阱帧
     uint64 ustack;                // 用户栈指针
     
-    // 上下文切换相关
     struct context context;       // 调度上下文
     
-    // 父子进程关系
     struct proc *parent;          // 父进程指针
     
-    // 等待相关
     void *chan;              // 睡眠通道 (sleep/wait)
     int wait_pid;            // wait时等待的进程ID
 };
@@ -126,5 +121,25 @@ int can_fork(int uid);             // 检查用户是否可以fork
 void sleep(void *chan);            // 睡眠直到被唤醒
 void wakeup(void *chan);           // 唤醒所有睡眠在通道上的进程
 void wakeup_one(void *chan);       // 唤醒一个睡眠在通道上的进程
+
+// 等待队列节点
+struct wait_queue_node {
+    struct proc *proc;              // 等待的进程
+    struct wait_queue_node *next;   // 下一个节点
+};
+
+// 信号量定义（带等待队列）
+typedef struct {
+    int value;                      // 信号量计数值
+    void *chan;                     // 等待通道（使用信号量地址）
+    struct wait_queue_node *head;   // 等待队列头
+    struct wait_queue_node *tail;   // 等待队列尾
+} semaphore_t;
+
+// 信号量操作
+void sem_init(semaphore_t *sem, int value);  // 初始化信号量
+void sem_wait(semaphore_t *sem);             // P操作（等待/减少）
+void sem_post(semaphore_t *sem);             // V操作（释放/增加）
+int sem_trywait(semaphore_t *sem);           // 非阻塞P操作
 
 #endif

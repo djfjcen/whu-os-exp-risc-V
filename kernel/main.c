@@ -445,6 +445,396 @@ void test_round_robin_scheduler(void) {
     uart_puts("✓ 调度器测试完成（返回）\n");
 }
 
+// ============================================================================
+// 生产者消费者问题演示
+// ============================================================================
+
+#define BUFFER_SIZE 5   // 缓冲区大小
+#define PROD_COUNT 3    // 生产次数
+#define CONS_COUNT 3    // 消费次数
+
+// 共享缓冲区
+static int buffer[BUFFER_SIZE];
+static int in = 0;   // 生产者写入位置
+static int out = 0;  // 消费者读取位置
+
+// 信号量
+static semaphore_t empty;  // 空槽位数量
+static semaphore_t full;   // 满槽位数量
+static semaphore_t mutex;  // 互斥访问缓冲区
+
+/**
+ * 生产者线程
+ */
+static void producer(void) {
+    int pid = get_pid();
+    
+    for (int i = 0; i < PROD_COUNT; i++) {
+        int item = pid * 100 + i;  // 生产的数据
+        
+        printf("[Producer %d] 尝试生产 item=%d\n", pid, item);
+        
+        // P(empty): 等待空槽位
+        sem_wait(&empty);
+        
+        // P(mutex): 进入临界区
+        sem_wait(&mutex);
+        
+        // 放入缓冲区
+        buffer[in] = item;
+        printf("[Producer %d] 生产 item=%d, 放入 buffer[%d]\n", pid, item, in);
+        in = (in + 1) % BUFFER_SIZE;
+        
+        // V(mutex): 离开临界区
+        sem_post(&mutex);
+        
+        // V(full): 增加满槽位
+        sem_post(&full);
+        
+        // 模拟生产时间
+        for (volatile int d = 0; d < 100000; d++) { }
+        
+        yield();  // 主动让出CPU
+    }
+    
+    printf("[Producer %d] 完成所有生产，退出\n", pid);
+    exit(0);
+}
+
+/**
+ * 消费者线程
+ */
+static void consumer(void) {
+    int pid = get_pid();
+    
+    for (int i = 0; i < CONS_COUNT; i++) {
+        printf("[Consumer %d] 尝试消费\n", pid);
+        
+        // P(full): 等待满槽位
+        sem_wait(&full);
+        
+        // P(mutex): 进入临界区
+        sem_wait(&mutex);
+        
+        // 从缓冲区取出
+        int item = buffer[out];
+        printf("[Consumer %d] 消费 item=%d, 从 buffer[%d]\n", pid, item, out);
+        out = (out + 1) % BUFFER_SIZE;
+        
+        // V(mutex): 离开临界区
+        sem_post(&mutex);
+        
+        // V(empty): 增加空槽位
+        sem_post(&empty);
+        
+        // 模拟消费时间
+        for (volatile int d = 0; d < 100000; d++) { }
+        
+        yield();  // 主动让出CPU
+    }
+    
+    printf("[Consumer %d] 完成所有消费，退出\n", pid);
+    exit(0);
+}
+
+/**
+ * 测试生产者消费者问题
+ */
+void test_producer_consumer(void) {
+    uart_puts("\n");
+    uart_puts("╔════════════════════════════════════════════════════════════════╗\n");
+    uart_puts("║          信号量演示：生产者-消费者问题                          ║\n");
+    uart_puts("╚════════════════════════════════════════════════════════════════╝\n\n");
+    
+    printf("缓冲区大小: %d\n", BUFFER_SIZE);
+    printf("生产者数量: 2, 消费者数量: 2\n");
+    printf("每个生产者生产 %d 个产品\n", PROD_COUNT);
+    printf("每个消费者消费 %d 个产品\n\n", CONS_COUNT);
+    
+    // 初始化信号量
+    sem_init(&empty, BUFFER_SIZE);  // 开始时有 BUFFER_SIZE 个空槽位
+    sem_init(&full, 0);             // 开始时有 0 个满槽位
+    sem_init(&mutex, 1);            // 互斥锁，初始值为1
+    
+    printf("信号量初始化: empty=%d, full=%d, mutex=%d\n\n", 
+           empty.value, full.value, mutex.value);
+    
+    // 创建生产者进程
+    for (int i = 0; i < 2; i++) {
+        struct proc *p = alloc_proc();
+        if (p) {
+            p->context.ra = (uint64)producer;
+            p->state = RUNNABLE;
+            printf("创建生产者进程 PID=%d\n", p->pid);
+        }
+    }
+    
+    // 创建消费者进程
+    for (int i = 0; i < 2; i++) {
+        struct proc *p = alloc_proc();
+        if (p) {
+            p->context.ra = (uint64)consumer;
+            p->state = RUNNABLE;
+            printf("创建消费者进程 PID=%d\n", p->pid);
+        }
+    }
+    
+    uart_puts("\n启动生产者-消费者演示...\n\n");
+    
+    // 启动调度器
+    scheduler();
+}
+
+// ============================================================================
+// 读者-写者问题演示（读者优先策略）
+// ============================================================================
+
+#define READ_COUNT 3    // 每个读者读取次数
+#define WRITE_COUNT 2   // 每个写者写入次数
+
+// 共享数据
+static int shared_data = 0;
+static int read_count = 0;  // 当前正在读的读者数量
+
+// 信号量
+static semaphore_t rw_mutex;      // 保护共享数据的读写互斥
+static semaphore_t read_mutex;    // 保护read_count的互斥
+static semaphore_t write_mutex;   // 写者之间的互斥（可选，防止写者饥饿）
+
+/**
+ * 读者线程
+ */
+static void reader(void) {
+    int pid = get_pid();
+    
+    for (int i = 0; i < READ_COUNT; i++) {
+        printf("[Reader %d] 尝试读取（第%d次）\n", pid, i+1);
+        
+        // P(read_mutex): 保护read_count
+        sem_wait(&read_mutex);
+        read_count++;
+        if (read_count == 1) {
+            // 第一个读者需要获取rw_mutex，阻止写者
+            printf("[Reader %d] 第一个读者，获取读写锁\n", pid);
+            sem_wait(&rw_mutex);
+        }
+        sem_post(&read_mutex);
+        
+        // 读取共享数据
+        int value = shared_data;
+        printf("[Reader %d] 读取数据: %d (当前读者数: %d)\n", 
+               pid, value, read_count);
+        
+        // 模拟读取时间
+        for (volatile int d = 0; d < 50000; d++) { }
+        
+        // P(read_mutex): 保护read_count
+        sem_wait(&read_mutex);
+        read_count--;
+        if (read_count == 0) {
+            // 最后一个读者释放rw_mutex，允许写者
+            printf("[Reader %d] 最后一个读者，释放读写锁\n", pid);
+            sem_post(&rw_mutex);
+        }
+        sem_post(&read_mutex);
+        
+        printf("[Reader %d] 读取完成\n", pid);
+        
+        // 模拟间隔时间
+        for (volatile int d = 0; d < 50000; d++) { }
+        yield();
+    }
+    
+    printf("[Reader %d] 完成所有读取，退出\n", pid);
+    exit(0);
+}
+
+/**
+ * 写者线程
+ */
+static void writer(void) {
+    int pid = get_pid();
+    
+    for (int i = 0; i < WRITE_COUNT; i++) {
+        printf("[Writer %d] 尝试写入（第%d次）\n", pid, i+1);
+        
+        // P(rw_mutex): 获取读写锁
+        sem_wait(&rw_mutex);
+        
+        // 写入共享数据
+        int old_value = shared_data;
+        shared_data = pid * 100 + i;
+        printf("[Writer %d] 写入数据: %d -> %d\n", 
+               pid, old_value, shared_data);
+        
+        // 模拟写入时间
+        for (volatile int d = 0; d < 100000; d++) { }
+        
+        // V(rw_mutex): 释放读写锁
+        sem_post(&rw_mutex);
+        
+        printf("[Writer %d] 写入完成\n", pid);
+        
+        // 模拟间隔时间
+        for (volatile int d = 0; d < 100000; d++) { }
+        yield();
+    }
+    
+    printf("[Writer %d] 完成所有写入，退出\n", pid);
+    exit(0);
+}
+
+/**
+ * 测试读者-写者问题（读者优先）
+ */
+void test_reader_writer(void) {
+    uart_puts("\n");
+    uart_puts("╔════════════════════════════════════════════════════════════════╗\n");
+    uart_puts("║          信号量演示：读者-写者问题（读者优先）                  ║\n");
+    uart_puts("╚════════════════════════════════════════════════════════════════╝\n\n");
+    
+    printf("共享数据初始值: %d\n", shared_data);
+    printf("读者数量: 3, 写者数量: 2\n");
+    printf("每个读者读取 %d 次\n", READ_COUNT);
+    printf("每个写者写入 %d 次\n\n", WRITE_COUNT);
+    
+    // 初始化信号量
+    sem_init(&rw_mutex, 1);      // 读写互斥锁
+    sem_init(&read_mutex, 1);    // 读者计数互斥锁
+    sem_init(&write_mutex, 1);   // 写者互斥锁
+    
+    printf("信号量初始化: rw_mutex=%d, read_mutex=%d\n\n", 
+           rw_mutex.value, read_mutex.value);
+    
+    uart_puts("说明：\n");
+    uart_puts("- 读者优先策略：多个读者可以同时读取\n");
+    uart_puts("- 写者必须等待所有读者完成才能写入\n");
+    uart_puts("- 写者写入时，其他读者和写者都必须等待\n\n");
+    
+    // 创建读者进程
+    for (int i = 0; i < 3; i++) {
+        struct proc *p = alloc_proc();
+        if (p) {
+            p->context.ra = (uint64)reader;
+            p->state = RUNNABLE;
+            printf("创建读者进程 PID=%d\n", p->pid);
+        }
+    }
+    
+    // 创建写者进程
+    for (int i = 0; i < 2; i++) {
+        struct proc *p = alloc_proc();
+        if (p) {
+            p->context.ra = (uint64)writer;
+            p->state = RUNNABLE;
+            printf("创建写者进程 PID=%d\n", p->pid);
+        }
+    }
+    
+    uart_puts("\n启动读者-写者演示...\n\n");
+    
+    // 启动调度器
+    scheduler();
+}
+
+// ============================================================================
+// 哲学家就餐问题演示
+// ============================================================================
+
+#define NUM_PHILOSOPHERS 5
+#define EAT_COUNT 2  // 每个哲学家吃的次数
+
+// 信号量数组（每个叉子一个信号量）
+static semaphore_t forks[NUM_PHILOSOPHERS];
+
+/**
+ * 哲学家线程
+ */
+static void philosopher(void) {
+    int pid = get_pid();
+    int id = pid % NUM_PHILOSOPHERS;  // 哲学家编号 (0-4)
+    int left_fork = id;
+    int right_fork = (id + 1) % NUM_PHILOSOPHERS;
+    
+    for (int i = 0; i < EAT_COUNT; i++) {
+        // 思考
+        printf("[哲学家 %d] 正在思考...\n", id);
+        for (volatile int d = 0; d < 100000; d++) { }
+        
+        // 拿起叉子（避免死锁：编号小的先拿）
+        printf("[哲学家 %d] 饿了，尝试拿叉子 %d 和 %d\n", 
+               id, left_fork, right_fork);
+        
+        if (left_fork < right_fork) {
+            sem_wait(&forks[left_fork]);
+            printf("[哲学家 %d] 拿起左边叉子 %d\n", id, left_fork);
+            sem_wait(&forks[right_fork]);
+            printf("[哲学家 %d] 拿起右边叉子 %d\n", id, right_fork);
+        } else {
+            sem_wait(&forks[right_fork]);
+            printf("[哲学家 %d] 拿起右边叉子 %d\n", id, right_fork);
+            sem_wait(&forks[left_fork]);
+            printf("[哲学家 %d] 拿起左边叉子 %d\n", id, left_fork);
+        }
+        
+        // 吃饭
+        printf("[哲学家 %d] 正在吃饭（第%d次）\n", id, i+1);
+        for (volatile int d = 0; d < 150000; d++) { }
+        
+        // 放下叉子
+        sem_post(&forks[left_fork]);
+        printf("[哲学家 %d] 放下左边叉子 %d\n", id, left_fork);
+        sem_post(&forks[right_fork]);
+        printf("[哲学家 %d] 放下右边叉子 %d\n", id, right_fork);
+        
+        printf("[哲学家 %d] 吃完了\n", id);
+        yield();
+    }
+    
+    printf("[哲学家 %d] 吃饱了，离开\n", id);
+    exit(0);
+}
+
+/**
+ * 测试哲学家就餐问题
+ */
+void test_dining_philosophers(void) {
+    uart_puts("\n");
+    uart_puts("╔════════════════════════════════════════════════════════════════╗\n");
+    uart_puts("║          信号量演示：哲学家就餐问题                            ║\n");
+    uart_puts("╚════════════════════════════════════════════════════════════════╝\n\n");
+    
+    printf("哲学家数量: %d\n", NUM_PHILOSOPHERS);
+    printf("每个哲学家吃 %d 次\n\n", EAT_COUNT);
+    
+    // 初始化叉子信号量
+    for (int i = 0; i < NUM_PHILOSOPHERS; i++) {
+        sem_init(&forks[i], 1);
+        printf("叉子 %d 初始化\n", i);
+    }
+    
+    uart_puts("\n说明：\n");
+    uart_puts("- 5个哲学家围坐在圆桌旁\n");
+    uart_puts("- 每两个哲学家之间有一把叉子（共5把）\n");
+    uart_puts("- 哲学家需要同时拿到左右两把叉子才能吃饭\n");
+    uart_puts("- 使用编号顺序拿叉子策略避免死锁\n\n");
+    
+    // 创建哲学家进程
+    for (int i = 0; i < NUM_PHILOSOPHERS; i++) {
+        struct proc *p = alloc_proc();
+        if (p) {
+            p->context.ra = (uint64)philosopher;
+            p->state = RUNNABLE;
+            printf("创建哲学家进程 PID=%d (哲学家%d)\n", p->pid, i);
+        }
+    }
+    
+    uart_puts("\n启动哲学家就餐演示...\n\n");
+    
+    // 启动调度器
+    scheduler();
+}
+
 /**
  * 测试1 (进程): 进程分配和释放
  * 检查：
@@ -828,8 +1218,18 @@ void main() {
     // 运行进程管理系统测试
     run_process_management_tests();
 
-    // 运行时间片轮转调度测试（该测试会启动调度器并运行工作线程）
-    test_round_robin_scheduler();
+    // ========================================
+    // 选择要运行的同步问题演示
+    // ========================================
+    
+    // 1. 生产者消费者问题
+    test_producer_consumer();
+    
+    // 2. 读者写者问题（读者优先）
+    // test_reader_writer();
+    
+    // 3. 哲学家就餐问题
+    // test_dining_philosophers();
 
     // 如果调度器返回，进入空闲循环
     uart_puts("系统进入空闲循环（调度器返回）...\n");

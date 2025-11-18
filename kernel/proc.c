@@ -401,15 +401,7 @@ int load_user_program(struct proc *p, void* code, uint64_t sz) {
 static struct context scheduler_context;
 static int scheduler_initialized = 0;
 
-/**
- * 简单的轮转调度器
- * 参考xv6的scheduler()实现
- * 
- * 调度算法：轮转调度
- * - 遍历进程表，找到第一个RUNNABLE的进程
- * - 通过switch_context切换到该进程
- * - 当进程让出CPU或被时间中断抢占时，恢复到scheduler继续循环
- */
+
 void scheduler(void) {
     if (!scheduler_initialized) {
         uart_puts("[proc] Scheduler started\n");
@@ -457,8 +449,7 @@ void scheduler(void) {
         // 如果一整轮扫描都没有找到 RUNNABLE 进程
         if (!found) {
             // 短暂让出CPU，避免忙轮询
-            // 在实际系统中可以使用 wfi() (等待中断)
-            // 这里简单等待，然后继续扫描
+
         }
     }
 }
@@ -744,4 +735,129 @@ void wakeup_one(void *chan) {
     }
     
     spin_unlock(&proc_lock);
+}
+
+// ============================================================================
+// 信号量实现（带等待队列）
+// ============================================================================
+
+/**
+ * 将进程加入等待队列
+ */
+static void sem_enqueue(semaphore_t *sem, struct proc *p) {
+    // 分配等待队列节点
+    struct wait_queue_node *node = (struct wait_queue_node *)alloc_page();
+    if (!node) return;
+    
+    node->proc = p;
+    node->next = 0;
+    
+    if (sem->tail) {
+        sem->tail->next = node;
+        sem->tail = node;
+    } else {
+        sem->head = sem->tail = node;
+    }
+}
+
+/**
+ * 从等待队列移除并返回第一个进程
+ */
+static struct proc* sem_dequeue(semaphore_t *sem) {
+    if (!sem->head) return 0;
+    
+    struct wait_queue_node *node = sem->head;
+    struct proc *p = node->proc;
+    
+    sem->head = node->next;
+    if (!sem->head) {
+        sem->tail = 0;
+    }
+    
+    free_page((char *)node);
+    return p;
+}
+
+/**
+ * 初始化信号量
+ */
+void sem_init(semaphore_t *sem, int value) {
+    if (!sem) return;
+    sem->value = value;
+    sem->chan = (void *)sem;
+    sem->head = 0;
+    sem->tail = 0;
+}
+
+/**
+ * P操作（带等待队列）
+ */
+void sem_wait(semaphore_t *sem) {
+    if (!sem) return;
+    
+    struct proc *p = current_proc;
+    if (!p) return;
+    
+    spin_lock(&proc_lock);
+    
+    while (sem->value <= 0) {
+        // 加入等待队列
+        sem_enqueue(sem, p);
+        
+        // 标记为睡眠
+        p->state = SLEEPING;
+        p->chan = sem->chan;
+        
+        spin_unlock(&proc_lock);
+        
+        printf("[sem_wait] Process %d blocked (value=%d)\n", p->pid, sem->value);
+        yield();
+        
+        spin_lock(&proc_lock);
+    }
+    
+    sem->value--;
+    printf("[sem_wait] Process %d acquired (value=%d)\n", p->pid, sem->value);
+    
+    spin_unlock(&proc_lock);
+}
+
+/**
+ * V操作（带等待队列）
+ */
+void sem_post(semaphore_t *sem) {
+    if (!sem) return;
+    
+    spin_lock(&proc_lock);
+    
+    sem->value++;
+    printf("[sem_post] Semaphore released (value=%d)\n", sem->value);
+    
+    // 从等待队列中唤醒一个进程
+    struct proc *p = sem_dequeue(sem);
+    if (p && p->state == SLEEPING && p->chan == sem->chan) {
+        p->state = RUNNABLE;
+        p->chan = 0;
+        printf("[sem_post] Woke up process %d\n", p->pid);
+    }
+    
+    spin_unlock(&proc_lock);
+}
+
+/**
+ * 非阻塞P操作
+ */
+int sem_trywait(semaphore_t *sem) {
+    if (!sem) return -1;
+    
+    spin_lock(&proc_lock);
+    
+    if (sem->value > 0) {
+        sem->value--;
+        spin_unlock(&proc_lock);
+        return 0;  // 成功
+    }
+    
+    spin_unlock(&proc_lock);
+    return -1;  // 失败
 }
