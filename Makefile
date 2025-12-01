@@ -1,77 +1,87 @@
-# 工具链
-CC = riscv64-unknown-elf-gcc
-OBJDUMP = riscv64-unknown-elf-objdump
-OBJCOPY = riscv64-unknown-elf-objcopy
-LD = riscv64-unknown-elf-ld
+# 工具链配置
+TOOLCHAIN = riscv64-unknown-elf-
+CC = $(TOOLCHAIN)gcc
+LD = $(TOOLCHAIN)ld
+OBJCOPY = $(TOOLCHAIN)objcopy
 
 # 编译选项
-CFLAGS = -Wall -O2 -ffreestanding -nostdlib -nostartfiles \
-         -march=rv64g -mabi=lp64d -mcmodel=medany \
-         -I include
+CFLAGS = -Wall -O2 -fno-omit-frame-pointer -ggdb
+CFLAGS += -march=rv64g -mabi=lp64d
+CFLAGS += -mcmodel=medany -ffreestanding -nostdlib
+CFLAGS += -Ikernel/
 
-# 链接脚本
-LINKER_SCRIPT = kernel/kernel.ld
+# 用户程序编译选项
+USER_CFLAGS = -Wall -O2 -march=rv64g -mabi=lp64d -nostdlib -ffreestanding -Iuser/ -Ikernel/
 
-# 内核目标文件
-KERNEL_ELF = kernel.elf
-KERNEL_BIN = kernel.bin
+# 源文件
+KERNEL_SRCS = \
+	kernel/entry.S \
+	kernel/kernelvec.S \
+	kernel/swtch.S \
+	kernel/trampoline.S \
+	kernel/start.c \
+	kernel/uart.c \
+	kernel/console.c \
+	kernel/printf.c \
+	kernel/kalloc.c \
+	kernel/vm.c \
+	kernel/riscv.c \
+	kernel/trap.c \
+	kernel/proc.c \
+	kernel/syscall.c \
+	kernel/kexec.c \
+	kernel/userprog.c
 
-# 内核对象文件
-KERNEL_OBJS = kernel/boot/entry.o \
-              kernel/main.o \
-              kernel/printf.o \
-              kernel/uart.o \
-              kernel/kalloc.o \
-              kernel/vm.o \
-              kernel/trap.o \
-              kernel/proc.o \
-              kernel/syscall.o \
-              kernel/sysproc.o \
-              kernel/machinevec.o \
-              kernel/kernelvec.o \
-              kernel/uservec.o \
-              kernel/swtch.o
+# 用户程序源文件
+USER_SRCS = main.c user/usrsyscall.c
+
+# 目标文件
+OBJS = $(patsubst %.S,%.o,$(patsubst %.c,%.o,$(KERNEL_SRCS)))
 
 # 默认目标
-.PHONY: all clean qemu
+all: kernel.bin user_main.bin
 
-all: $(KERNEL_ELF) $(KERNEL_BIN) kernel.asm kernel.sym
-	@echo "Build complete!"
+# 编译规则
+%.o: %.S
+	$(CC) $(CFLAGS) -c $< -o $@
 
-# 链接内核
-$(KERNEL_ELF): $(KERNEL_OBJS)
-	$(LD) -T $(LINKER_SCRIPT) -o $@ $^
-	@echo "Linking complete!"
+%.o: %.c
+	$(CC) $(CFLAGS) -c $< -o $@
 
-# 生成二进制文件
-$(KERNEL_BIN): $(KERNEL_ELF)
+# 用户程序编译
+user/%.o: user/%.c
+	$(CC) $(USER_CFLAGS) -c $< -o $@
+
+main.o: main.c
+	$(CC) $(USER_CFLAGS) -c $< -o $@
+
+user_main.elf: main.o user/usrsyscall.o
+	$(LD) -Ttext=0 -o $@ $^
+
+user_main.bin: user_main.elf
 	$(OBJCOPY) -O binary $< $@
 
-# 生成反汇编文件
-kernel.asm: $(KERNEL_ELF)
-	$(OBJDUMP) -S $< > $@
+kernel/userprog_data.h: user_main.bin
+	./scripts/bin2c.sh $< $@ user_main_bin
 
-# 生成符号表
-kernel.sym: $(KERNEL_ELF)
-	$(OBJDUMP) -t $< | sed '1,/SYMBOL TABLE/d; s/ .* / /; /^$$/d' > $@
+# 默认目标
+all: kernel.bin kernel/userprog_data.h
 
-# 编译C源文件
-kernel/%.o: kernel/%.c
-	$(CC) $(CFLAGS) -c -o $@ $<
+# 链接内核
+kernel.elf: $(OBJS) kernel.ld
+	$(LD) -T kernel.ld -o $@ $(OBJS)
 
-# 编译汇编源文件
-kernel/%.o: kernel/%.S
-	$(CC) $(CFLAGS) -c -o $@ $<
-
-kernel/boot/%.o: kernel/boot/%.S
-	$(CC) $(CFLAGS) -c -o $@ $<
-	@echo "Compiled $<"
+# 生成原始二进制
+kernel.bin: kernel.elf
+	$(OBJCOPY) -O binary $< $@
 
 # 清理
 clean:
-	rm -f $(KERNEL_ELF) $(KERNEL_BIN) kernel.asm kernel.sym $(KERNEL_OBJS)
-	@echo "Cleanup complete!"
+	rm -f kernel.elf kernel.bin $(OBJS) user_main.elf user_main.bin main.o user/usrsyscall.o
 
 # 运行QEMU
-qemu: all
-	qemu-system-riscv64 -machine virt -nographic -bios none -kernel $(KERNEL_ELF)
+run: kernel.bin
+	qemu-system-riscv64 -machine virt -bios none \
+		-kernel kernel.bin \
+		-m 256M \
+		-nographic

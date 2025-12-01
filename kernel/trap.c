@@ -1,589 +1,202 @@
-#include "trap.h"
-#include "uart.h"
 #include "defs.h"
-#include "proc.h"
-#include <stddef.h>
+#include "memlayout.h"
 
-// CSR读写函数实现 - 内联汇编读写控制和状态寄存器
+/// @brief 定义在 kernelvec.S 中的内核 trap 入口函数
+extern void kernelvec();
 
-static inline uint64 r_sstatus(void) {
-    uint64 x;
-    asm volatile("csrr %0, sstatus" : "=r" (x));
-    return x;
+// /// @brief 启用 trap 处理程序
+// void tarp_init_hart() {
+//     // 设置内核的 trap 入口地址
+//     write_stvec( ( u64 ) kernelvec );
+// }
+
+void trap_init() {
+    // 设置内核的 trap 入口地址
+    write_stvec( ( u64 ) kernelvec );
 }
 
-static inline void w_sstatus(uint64 x) {
-    asm volatile("csrw sstatus, %0" : : "r" (x));
+int ticks = 0;
+
+/// @brief 处理时钟中断
+void handle_clock_intr() {
+    ticks++;
+
+    wakeup( ( void* ) &ticks );
+
+    // 记录下一个时钟中断时间（大约 0.1 秒后？）
+    write_stimecmp( read_time() + 1000000 );
 }
 
-static inline uint64 r_sip(void) {
-    uint64 x;
-    asm volatile("csrr %0, sip" : "=r" (x));
-    return x;
-}
+extern void spin();
 
-static inline void w_sip(uint64 x) {
-    asm volatile("csrw sip, %0" : : "r" (x));
-}
+/// @brief 检查是否是外部中断或者是软件中断，并且调用相应的处理函数
+/// @return 2：时钟中断；1：外部中断；-1：无效
+int handle_device_intr( u64 scause ) {
+    // int msb = ( scause >> 63 ) & 1;
 
-static inline uint64 r_sie(void) {
-    uint64 x;
-    asm volatile("csrr %0, sie" : "=r" (x));
-    return x;
-}
+    switch ( scause ) {
+        case 0x8000000000000005L:
+            handle_clock_intr();
+            return 2;
 
-static inline void w_sie(uint64 x) {
-    asm volatile("csrw sie, %0" : : "r" (x));
-}
-
-static inline uint64 r_scause(void) {
-    uint64 x;
-    asm volatile("csrr %0, scause" : "=r" (x));
-    return x;
-}
-
-static inline uint64 r_sepc(void) {
-    uint64 x;
-    asm volatile("csrr %0, sepc" : "=r" (x));
-    return x;
-}
-
-static inline void w_sepc(uint64 x) {
-    asm volatile("csrw sepc, %0" : : "r" (x));
-}
-
-static inline uint64 r_stval(void) {
-    uint64 x;
-    asm volatile("csrr %0, stval" : "=r" (x));
-    return x;
-}
-
-static inline uint64 r_stvec(void) {
-    uint64 x;
-    asm volatile("csrr %0, stvec" : "=r" (x));
-    return x;
-}
-
-static inline void w_stvec(uint64 x) {
-    asm volatile("csrw stvec, %0" : : "r" (x));
-}
-
-// RISC-V权限级CSR定义
-#define SSTATUS_SPP (1L << 8)   // Previous privilege level
-#define SSTATUS_SPIE (1L << 5)  // Previous interrupt enable
-#define SSTATUS_SIE (1L << 1)   // Interrupt enable
-
-#define SIE_SEIE (1L << 9)      // External interrupt enable
-#define SIE_STIE (1L << 5)      // Timer interrupt enable
-#define SIE_SSIE (1L << 1)      // Software interrupt enable
-
-// 全局时钟计数器
-volatile uint64 ticks = 0;
-
-// 机器模式时钟中断计数
-static volatile uint64 m_mode_ticks = 0;
-
-/**
- * 获取当前系统时钟滴答数
- */
-uint64 get_ticks(void) {
-    return ticks;
-}
-
-// 机器模式时钟中断处理函数
-void machine_timer_handler(void) {
-    // 递增 M-mode 下的 ticks 计数
-    m_mode_ticks++;
-    ticks++;  // 也递增全局 ticks
-    
-    printf("[M-mode] Timer interrupt! m_mode_ticks=%ld\n", m_mode_ticks);
-    
-    // 设置下一个时间中断
-    uint64 current_time = *(uint64*)CLINT_MTIME;
-    uint64 next_time = current_time + TIMER_INTERVAL;
-    *(uint64*)CLINT_MTIMECMP = next_time;
-}
-
-// 陷阱帧池 - 用于分配trapframe
-#define MAX_TRAPFRAMES 256
-struct trapframe trapframe_pool[MAX_TRAPFRAMES];
-int trapframe_used[MAX_TRAPFRAMES];
-
-// 中断处理器向量表
-trap_handler_t trap_handlers[16];
-
-// 当前中断状态 (简化实现，每个hart一个)
-static int intr_state = 0;
-
-/**
- * 分配陷阱帧
- */
-struct trapframe* alloc_trapframe(void) {
-    for (int i = 0; i < MAX_TRAPFRAMES; i++) {
-        if (!trapframe_used[i]) {
-            trapframe_used[i] = 1;
-            return &trapframe_pool[i];
-        }
-    }
-    return 0;
-}
-
-/**
- * 释放陷阱帧
- */
-void free_trapframe(struct trapframe* tf) {
-    if (tf >= trapframe_pool && tf < trapframe_pool + MAX_TRAPFRAMES) {
-        trapframe_used[tf - trapframe_pool] = 0;
-    }
-}
-
-/**
- * 启用中断
- */
-void intr_on(void) {
-    w_sstatus(r_sstatus() | SSTATUS_SIE);
-    intr_state = 1;
-}
-
-/**
- * 禁用中断
- */
-void intr_off(void) {
-    w_sstatus(r_sstatus() & ~SSTATUS_SIE);
-    intr_state = 0;
-}
-
-/**
- * 获取中断状态
- */
-int intr_get(void) {
-    return (r_sstatus() & SSTATUS_SIE) != 0;
-}
-
-/**
- * 设置中断向量地址
- * mode: 0 = direct (mtvec = trapvec_addr)
- *       1 = vectored (mtvec = trapvec_addr + 4*cause)
- */
-void set_stvec(uint64 addr, int mode) {
-    w_stvec(addr + mode);
-}
-
-/**
- * 初始化中断系统
- * 参考xv6的initializerasproc
- */
-void trap_init(void) {
-    uart_puts("[trap] Initializing trap system...\n");
-    
-    // 初始化trapframe池
-    for (int i = 0; i < MAX_TRAPFRAMES; i++) {
-        trapframe_used[i] = 0;
-    }
-    
-    // 初始化处理器向量表并注册处理函数
-    for (int i = 0; i < 16; i++) {
-        trap_handlers[i] = NULL;
-    }
-    
-    // 注册中断处理函数
-    // 时钟中断（IRQ 5）
-    trap_handlers[5] = (trap_handler_t)handle_timer_interrupt;
-    
-    // 外部中断（IRQ 9）
-    trap_handlers[9] = (trap_handler_t)handle_external_interrupt;
-    
-    // 软件中断（IRQ 1）
-    trap_handlers[1] = (trap_handler_t)handle_software_interrupt;
-    
-    // 异常处理函数不通过 trap_handlers 注册，而是在 handle_exception 中直接处理
-    // 包括：系统调用、页故障、非法指令等
-    
-    int registered_count = 0;
-    for (int i = 0; i < 16; i++) {
-        if (trap_handlers[i] != NULL) {
-            registered_count++;
-        }
-    }
-    printf("[trap] Registered %d interrupt handlers\n", registered_count);
-    
-    uart_puts("[trap] Trap system initialized\n");
-}
-
-/**
- * 初始化当前Hart的中断
- */
-void trap_init_hart(void) {
-    uart_puts("[trap] Initializing trap for hart...\n");
-    
-    // 设置监督模式中断向量基址
-    // 外部代码应该提供kernelvec的地址
-    extern void kernelvec();
-    set_stvec((uint64)&kernelvec, 0);  // direct mode
-    
-    // 启用监督模式下的时钟中断、外部中断、软件中断
-    w_sie(r_sie() | SIE_SEIE | SIE_STIE | SIE_SSIE);
-    
-    // 启用全局中断
-    intr_on();
-    
-    uart_puts("[trap] Trap for hart initialized\n");
-}
-
-/**
- * 设置下一个时间中断
- * 在 QEMU virt 平台中，CLINT 使用 mtime 和 mtimecmp 寄存器
- */
-void set_next_timer(void) {
-    // 读取当前时间值
-    uint64 current_time = *(uint64*)CLINT_MTIME;
-    // 设置下一次中断的时间
-    uint64 next_time = current_time + TIMER_INTERVAL;
-    *(uint64*)CLINT_MTIMECMP = next_time;
-    printf("[timer] current_time=0x%lx, next_time=0x%lx\n", current_time, next_time);
-}
-
-/**
- * 初始化时间中断
- */
-void timerinit(void) {
-    uart_puts("[trap] Initializing timer...\n");
-    
-    // 设置第一个时间中断
-    set_next_timer();
-    
-    // 启用监督模式时钟中断 (在 trap_init_hart 中已经启用)
-    // w_sie(r_sie() | SIE_STIE);
-    
-    uart_puts("[trap] Timer initialized\n");
-}
-
-/**
- * 设备中断分发函数
- * 根据中断源调用相应的处理函数
- * 返回非零表示处理了中断
- */
-int devintr(void) {
-    uint64 scause = r_scause();
-    
-    // 检查是否是中断 (最高位为1)
-    if (!(scause & (1UL << 63))) {
-        return 0;  // 不是中断，是异常
-    }
-    
-    // 提取中断类型 (低位)
-    int irq = scause & 0x0F;
-    
-    switch (irq) {
-        case INTR_S_TIMER:
-            // 时钟中断处理
-            ticks++;
-            set_next_timer();
-            printf("[trap] Timer interrupt (tick %ld)\n", ticks);
-            handle_timer_interrupt();
+        case 0x2L:
+            // TODO
+            printf( "handle_device_intr: scause = 0x%x\n", scause );
+            panic( "handle_device_intr: external interrupt not implemented" );
             return 1;
-            
-        case INTR_S_EXTERNAL:
-            // 外部中断处理
-            uart_puts("[trap] External interrupt\n");
-            handle_external_interrupt();
-            return 1;
-            
-        case 1:  // 软件中断
-            uart_puts("[trap] Software interrupt\n");
-            // 清除软件中断
-            w_sip(r_sip() & ~2);
-            handle_software_interrupt();
-            return 1;
-            
+
         default:
-            printf("[trap] Unknown interrupt: %d\n", irq);
-            return 0;
+            return -1;
     }
 }
 
-/**
- * 处理异常（同步异常）
- */
-void handle_exception(struct trapframe *tf) {
-    uint64 scause = r_scause();
-    uint64 sepc = r_sepc();
-    
-    switch (scause) {
-        case EXCP_UENV_CALL:  // 用户系统调用 (ecall)
-            // 系统调用在 usertrap() 中处理，不应该到这里
-            printf("[trap] Unexpected syscall in handle_exception\n");
-            break;
-            
-        case EXCP_INSTR_PAGE_FAULT:
-            printf("[trap] Instruction page fault at 0x%lx\n", sepc);
-            handle_trap_page_fault(tf, 0);  // 0 表示读/执行操作
-            break;
-            
-        case EXCP_LOAD_PAGE_FAULT:
-            printf("[trap] Load page fault\n");
-            handle_trap_page_fault(tf, 0);  // 0 表示读操作
-            break;
-            
-        case EXCP_STORE_PAGE_FAULT:
-            printf("[trap] Store page fault\n");
-            handle_trap_page_fault(tf, 1);  // 1 表示写操作
-            break;
-            
-        case EXCP_ILLEGAL_INSTR:
-            printf("[trap] Illegal instruction at 0x%lx\n", sepc);
-            handle_illegal_instruction(tf);
-            break;
-            
-        case EXCP_BREAKPOINT:
-            printf("[trap] Breakpoint at 0x%lx\n", sepc);
-            handle_breakpoint(tf);
-            break;
-            
-        case EXCP_LOAD_MISALIGNED:
-            printf("[trap] Load address misaligned at 0x%lx\n", sepc);
-            break;
-            
-        case EXCP_STORE_MISALIGNED:
-            printf("[trap] Store address misaligned at 0x%lx\n", sepc);
-            break;
-            
-        default:
-            printf("[trap] Unknown exception: %ld at 0x%lx\n", scause, sepc);
-            break;
-    }
-}
+/// @brief 内核态的 trap 处理函数
+void kernel_trap() {
+    u64 scause = read_scause();
+    u64 sepc = read_sepc();
+    u64 sstatus = read_sstatus();
 
-/**
- * 内核态中断处理 - 从kernelvec.S调用
- * 处理在内核执行时发生的中断和异常
- */
-void kerneltrap(void) {
-    uint64 scause = r_scause();
-    uint64 sepc = r_sepc();
-    
-    // 检查中断/异常属性
-    if (scause & (1UL << 63)) {
-        // 中断 (异步)
-        if (!devintr()) {
-            printf("[trap] Unknown device interrupt, scause=%d\n", scause & 0x0F);
-        }
-    } else {
-        // 异常 (同步)
-        handle_exception((struct trapframe *)sepc);  // 这里可能需要调整
+    if ( ( sstatus & SSTATUS_SPP ) == 0 ) {
+        // 并非由 supervisor 模式进入 kernel trap
+        panic( "kernel_trap: not from supervisor mode" );
     }
-}
 
-/**
- * 用户态中断处理 - 从uservec.S调用
- * 处理在用户程序执行时发生的中断和异常
- * 完全参考 xv6 的 usertrap 实现
- */
-void usertrap(void) {
-    uint64 scause = r_scause();
-    struct proc *p = myproc();
-    
-    if (p == NULL || p->trapframe == NULL) {
-        printf("usertrap: no process or trapframe\n");
-        return;
-    }
-    
-    // 保存 sepc，因为后续可能会发生进程切换
-    p->trapframe->sepc = r_sepc();
-    
-    if (scause & (1UL << 63)) {
-        // 中断 (异步)
-        if (!devintr()) {
-            printf("[trap] Unknown interrupt in user mode\n");
-        }
-    } else {
-        // 异常 (同步)
-        switch (scause) {
-            case EXCP_UENV_CALL:  // 系统调用
-                // 如果进程被 kill，直接退出
-                if(p->killed)
-                    exit(-1);
-                
-                // sepc 指向 ecall 指令，需要跳过它
-                p->trapframe->sepc += 4;
-                
-                // 启用中断以便系统调用期间可以响应中断
-                intr_on();
-                
-                // 调用系统调用分发器
-                syscall();
+    // 允许在内核处理中接受中断（例如 syscall 期间可能临时打开中断）
+    // 因此不要在这里因为中断打开而 panic。保留这个检查会在正常的
+    // syscall 处理或设备处理中引发不必要的 panic。
+    // if ( is_interupt_on() ) {
+    //     // handle trap 时不应该开启中断
+    //     panic( "kernel_trap: interrupt enabled" );
+    // }
+
+    // NOTICE: 不确定这是否会影响嵌套中断
+    if ( handle_device_intr( scause ) == -1 ) {
+        // 打印更多调试信息以便定位问题
+        u64 stval = read_stval();
+
+        printf( "kernel_trap: unexpected scause 0x%x\n", scause );
+        printf( "    sepc = 0x%x\n", sepc );
+        printf( "    stval = 0x%x\n", stval );
+
+        // 简单解码几个常见的同步异常代码，便于阅读
+        switch ( ( int ) scause ) {
+            case 0:
+                printf( "    exception: instruction address misaligned\n" );
                 break;
-                
-            case EXCP_INSTR_PAGE_FAULT:
-            case EXCP_LOAD_PAGE_FAULT:
-            case EXCP_STORE_PAGE_FAULT:
-                printf("[trap] Page fault in user mode at 0x%lx\n", r_stval());
-                // TODO: 页故障处理
-                p->killed = 1;
+            case 1:
+                printf( "    exception: instruction access fault\n" );
                 break;
-                
+            case 2:
+                printf( "    exception: illegal instruction\n" );
+                break;
+            case 5:
+                printf( "    exception: load access fault\n" );
+                break;
+            case 7:
+                printf( "    exception: store/AMO access fault\n" );
+                break;
+            case 12:
+                printf( "    exception: instruction page fault\n" );
+                break;
+            case 13:
+                printf( "    exception: load page fault\n" );
+                break;
+            case 15:
+                printf( "    exception: store/AMO page fault\n" );
+                break;
             default:
-                printf("[trap] Unknown exception %ld in user mode\n", scause);
-                p->killed = 1;
                 break;
         }
+
+        panic( "kernel_trap: unexpected scause" );
     }
-    
-    // 如果进程被 kill，退出
-    if(p->killed)
-        exit(-1);
-    
-    // 返回用户空间前，检查是否需要让出 CPU
-    // （参考 xv6 的抢占机制）
-    if(need_resched)
-        yield();
-    
-    // usertrapret() 会恢复用户进程状态并返回用户空间
-    usertrapret();
+
+    // 虽然目前因为没有进程调度，所以没有 yield，不会导致其他 intr 产生
+    // 但是仍然写上还原现场的代码
+    write_sepc( sepc );
+    write_sstatus( sstatus );
 }
 
-/**
- * ============================================================================
- * 具体的中断/异常处理函数实现
- * ============================================================================
- */
+u64 user_trap() {
+    int which_dev = 0;
 
-/**
- * 定时器中断处理
- * 参考 xv6 的时间中断处理
- * 
- * 功能：
- * 1. 计数时钟滴答
- * 2. 设置下一次定时器中断
- * 3. 设置抢占标志（不直接调用yield()避免嵌套调用问题）
- */
-void handle_timer_interrupt(void) {
-    printf("[timer] Timer interrupt: ticks=%ld\n", ticks);
-    
-    extern volatile int need_resched;
-    need_resched = 1;
-}
+    // 必须从用户态进入 trap
+    if ( ( read_sstatus() & SSTATUS_SPP ) != 0 )
+        panic( "usertrap: not from user mode" );
 
-/**
- * 外部中断处理
- * 用于处理 UART、网络、磁盘等外部设备中断
- */
-void handle_external_interrupt(void) {
-    // 外部中断处理逻辑
-    printf("[handle_external] External interrupt received\n");
-}
+    // 由于此时在内核态，仍然使用 kernel_trap()
+    write_stvec( ( u64 ) kernelvec );
 
-/**
- * 软件中断处理
- * 用于处理处理器间中断 (IPI)
- */
-void handle_software_interrupt(void) {
-    // 软件中断处理逻辑
-    printf("[handle_software] Software interrupt received\n");
-}
+    extern struct Process* curr_proc;
 
-/**
- * 系统调用处理
- * 参数: tf - 用户程序的陷阱帧
- * 
- * 注意：这个函数已经被 usertrap() 中的 syscall() 调用替代
- * 保留此函数以保持兼容性
- * 
- * RISC-V 系统调用约定:
- * - a7 寄存器: 系统调用号
- * - a0-a6 寄存器: 系统调用参数
- * - a0 寄存器: 返回值
- */
-void handle_syscall(struct trapframe *tf) {
-    // 这个函数不再需要，因为系统调用处理已经在 usertrap() 中通过 syscall() 完成
-    if (tf == NULL) {
-        uart_puts("[error] handle_syscall: trapframe is NULL\n");
-        return;
-    }
-    
-    printf("[syscall] handle_syscall called (deprecated, use syscall() instead)\n");
-}
+    // save user program counter.
+    curr_proc->trapframe->epc = read_sepc();
 
-/**
- * 页故障处理
- * 参数: tf - 陷阱帧
- *       is_write - 是否是写操作导致的页故障
- */
-void handle_trap_page_fault(struct trapframe *tf, int is_write) {
-    if (tf == NULL) {
-        uart_puts("[error] handle_trap_page_fault: trapframe is NULL\n");
-        return;
-    }
-    
-    // 获取访问失败的地址（在 stval 中）
-    uint64 fault_addr = r_stval();
-    
-    if (is_write) {
-        printf("[page_fault] Write page fault at 0x%lx\n", fault_addr);
+    int scause = read_scause();
+
+    if ( scause == 8 ) {
+        // 系统调用
+
+        if ( is_killed( curr_proc ) )
+            kexit( -1 );
+
+        curr_proc->trapframe->epc += 4;//下一条指令
+
+        // 重新启动中断，因为这个时候我们读取完成了
+        // sepc、sstatus、scause 等寄存器的值
+        interrupt_on();
+
+        syscall();
+
+    } else if ( ( read_scause() == 15 || read_scause() == 13 ) &&
+        vm_fault( curr_proc->page_table, read_stval(), ( read_scause() == 13 ) ? 1 : 0 ) != 0 ) {
     } else {
-        printf("[page_fault] Read/Exec page fault at 0x%lx\n", fault_addr);
+        printf( "usertrap(): unexpected scause 0x%x pid=%d\n", read_scause(), curr_proc->pid );
+        set_killed( curr_proc );
     }
-    
+
+    if ( is_killed( curr_proc ) )
+        kexit( -1 );
+
+    // // 如果是时钟中断，则进行调度
+    // if ( which_dev == 2 )
+    //     yield();
+
+    prepare_return();
+
+    // 获取 trampoline 中需要的用户态页表 satp 值
+    u64 satp = MAKE_SATP( curr_proc->page_table );
+
+    // 回到 trampoline.S，此时 satp 值会放在 a0
+    return satp;
 }
 
-/**
- * 非法指令处理
- * 参数: tf - 陷阱帧
- */
-void handle_illegal_instruction(struct trapframe *tf) {
-    if (tf == NULL) {
-        uart_puts("[error] handle_illegal_instruction: trapframe is NULL\n");
-        return;
-    }
-    
-    printf("[illegal_instr] Illegal instruction at 0x%lx\n", tf->sepc);
-    
-}
+/// @brief 准备从内核态返回用户态，执行相关的状态恢复工作
+void prepare_return() {
+    extern struct Process* curr_proc;
+    extern char trampoline[];
+    extern char uservec[];
 
-/**
- * 断点异常处理
- * 参数: tf - 陷阱帧
- */
-void handle_breakpoint(struct trapframe *tf) {
-    if (tf == NULL) {
-        uart_puts("[error] handle_breakpoint: trapframe is NULL\n");
-        return;
-    }
-    
-    printf("[breakpoint] Breakpoint at 0x%lx\n", tf->sepc);
-    
-}
+    // 将 stvec 从 kerneltrap() 转换为 usertrap()
+    interrupt_off();
 
-/**
- * 返回用户空间 - 参考 xv6 的 usertrapret
- * 这个函数会设置好返回用户空间需要的寄存器，然后调用 userret (在 uservec.S 中)
- */
-void usertrapret(void) {
-    struct proc *p = myproc();
-    
-    if (p == NULL || p->trapframe == NULL) {
-        printf("usertrapret: no process or trapframe\n");
-        return;
-    }
-    
-    // 关闭中断，准备返回用户空间
-    intr_off();
-    
-    // 告诉 trampoline.S 用户空间的页表
-    // 注意：xv6 这里会设置 stvec 指向 uservec，我们简化处理
-    
-    // 恢复用户进程的 sepc（在 trapframe 中保存）
-    w_sepc(p->trapframe->sepc);
-    
-    // 设置 sstatus 准备返回用户模式
-    uint64 sstatus = r_sstatus();
-    sstatus &= ~SSTATUS_SPP;  // 清除 SPP 位，返回用户模式
-    sstatus |= SSTATUS_SPIE;  // 启用用户模式中断
-    w_sstatus(sstatus);
-    
-    // 注意：完整的 xv6 实现会调用 userret (汇编函数) 来恢复所有寄存器
-    // 这里简化处理，假设寄存器已经在 trapframe 中正确保存
-    
-    // TODO: 实现完整的用户空间返回（需要汇编支持）
-    // 现在只是设置好寄存器，实际返回需要 sret 指令
+    // 即将转换到用户态，转发中断和异常到 uservec
+    u64 trampoline_uservec = TRAMPOLINE + ( uservec - trampoline );
+
+    write_stvec( trampoline_uservec );
+
+    extern struct Process* curr_proc;
+
+    curr_proc->trapframe->kernel_satp = read_satp();
+    curr_proc->trapframe->kernel_sp = curr_proc->kstack + PAGE_SIZE;
+    curr_proc->trapframe->kernel_trap = ( u64 ) user_trap;
+    // current_process->trapframe->kernel_hartid = r_tp();
+
+    // 准备返回用户态，重新启用中断
+    unsigned long x = read_sstatus();
+    x &= ~SSTATUS_SPP;
+    x |= SSTATUS_SPIE;
+    write_sstatus( x );
+
+    write_sepc( curr_proc->trapframe->epc );
 }
