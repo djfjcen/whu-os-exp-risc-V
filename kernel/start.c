@@ -39,10 +39,12 @@ void call_main() {
     // 初始化进程子系统
     process_init();
 
-    // printf( "Process subsystem initialized.\n" );
+    printf( "Process subsystem initialized.\n" );
 
     // 初始化文件系统
+    printf("About to call fs_init...\n");
     fs_init(ROOTDEV);
+    printf("fs_init returned.\n");
     
     // 初始化文件表
     file_init();

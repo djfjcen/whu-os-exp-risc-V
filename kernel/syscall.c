@@ -115,6 +115,9 @@ u64 syscall_read(void);
 u64 syscall_write(void);
 u64 syscall_mkdir(void);
 u64 syscall_unlink(void);
+u64 syscall_fstat(void);
+u64 syscall_dup(void);
+u64 syscall_link(void);
 
 /// @brief 系统调用处理函数指针数组
 static u64( *syscalls[] )( void ) = {
@@ -130,6 +133,9 @@ static u64( *syscalls[] )( void ) = {
     [SYSCALL_WRITE] syscall_write,
     [SYSCALL_MKDIR] syscall_mkdir,
     [SYSCALL_UNLINK] syscall_unlink,
+    [SYSCALL_FSTAT] syscall_fstat,
+    [SYSCALL_DUP] syscall_dup,
+    [SYSCALL_LINK] syscall_link,
 };
 
 void syscall() {

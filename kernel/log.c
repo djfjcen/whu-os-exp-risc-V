@@ -3,8 +3,8 @@
 #include "bio.h"
 #include "fs.h"
 
-// 简化的日志系统
-// 在真实系统中，这会实现写前日志(WAL)以支持崩溃恢复
+// 完整的日志系统实现
+// 实现写前日志(WAL)以支持崩溃恢复
 
 #define LOGSIZE 30  // 最大日志块数
 
@@ -25,6 +25,10 @@ struct log {
 
 static void recover_from_log(void);
 static void commit(void);
+static void write_log(void);
+static void write_head(void);
+static void install_trans(int recovering);
+static void read_head(void);
 
 void log_init(int dev, struct superblock *sb) {
     if(sizeof(struct logheader) >= BSIZE)
@@ -37,10 +41,71 @@ void log_init(int dev, struct superblock *sb) {
     recover_from_log();
 }
 
-// 从日志恢复（简化版本：直接忽略）
+// 从磁盘读取日志头
+static void read_head(void) {
+    struct buf *buf = bread(log_ctx.dev, log_ctx.start);
+    struct logheader *lh = (struct logheader *)(buf->data);
+    int i;
+    
+    log_ctx.lh.n = lh->n;
+    for(i = 0; i < log_ctx.lh.n; i++) {
+        log_ctx.lh.block[i] = lh->block[i];
+    }
+    brelse(buf);
+}
+
+// 将内存中的日志头写入磁盘
+// 这是提交点,在此之前崩溃,日志无效;在此之后崩溃,日志有效
+static void write_head(void) {
+    struct buf *buf = bread(log_ctx.dev, log_ctx.start);
+    struct logheader *hb = (struct logheader *)(buf->data);
+    int i;
+    
+    hb->n = log_ctx.lh.n;
+    for(i = 0; i < log_ctx.lh.n; i++) {
+        hb->block[i] = log_ctx.lh.block[i];
+    }
+    bwrite(buf);
+    brelse(buf);
+}
+
+// 将修改的块从缓存复制到日志
+static void write_log(void) {
+    int tail;
+    
+    for(tail = 0; tail < log_ctx.lh.n; tail++) {
+        struct buf *to = bread(log_ctx.dev, log_ctx.start + tail + 1);  // 日志块
+        struct buf *from = bread(log_ctx.dev, log_ctx.lh.block[tail]);  // 缓存块
+        mem_move(to->data, from->data, BSIZE);
+        bwrite(to);  // 写入日志
+        brelse(from);
+        brelse(to);
+    }
+}
+
+// 将日志中的块安装到它们在文件系统中的实际位置
+static void install_trans(int recovering) {
+    int tail;
+    
+    for(tail = 0; tail < log_ctx.lh.n; tail++) {
+        struct buf *lbuf = bread(log_ctx.dev, log_ctx.start + tail + 1);  // 读取日志块
+        struct buf *dbuf = bread(log_ctx.dev, log_ctx.lh.block[tail]);    // 读取目标块
+        mem_move(dbuf->data, lbuf->data, BSIZE);  // 复制数据
+        bwrite(dbuf);  // 写入磁盘
+        if(!recovering)
+            bunpin(dbuf);
+        brelse(lbuf);
+        brelse(dbuf);
+    }
+}
+
+// 从日志恢复
+// 在系统启动时调用,在第一次用户进程运行之前
 static void recover_from_log(void) {
-    // 简化实现：不做恢复
-    // 实际实现需要读取日志头，重放日志
+    read_head();
+    install_trans(1);  // 如果已提交,则安装
+    log_ctx.lh.n = 0;
+    write_head();  // 清除日志
 }
 
 // 开始文件系统操作
@@ -102,21 +167,18 @@ void log_write(struct buf *b) {
 }
 
 // 提交当前事务
+// 完整的四步提交协议:
+// 1. write_log() - 将修改的块写入日志
+// 2. write_head() - 将日志头写入磁盘(提交点)
+// 3. install_trans() - 将日志块安装到实际位置
+// 4. write_head() - 清除日志头(标记事务完成)
 static void commit(void) {
     if(log_ctx.lh.n > 0) {
-        // 写入日志头（简化：直接跳过）
-        // write_log();     // 将修改的块写入日志
-        // write_head();    // 写入日志头到磁盘
-        // install_trans(); // 将日志中的块写入实际位置
-        
-        // 简化实现：直接写入磁盘
-        for(int i = 0; i < log_ctx.lh.n; i++) {
-            struct buf *to = bread(log_ctx.dev, log_ctx.lh.block[i]);
-            bwrite(to);
-            brelse(to);
-            bunpin(to);
-        }
-        
+        write_log();      // 写入修改的块到日志
+        write_head();     // 写入日志头到磁盘 - 提交点
+        install_trans(0); // 安装日志到实际位置
         log_ctx.lh.n = 0;
+        write_head();     // 清除日志
     }
 }
+

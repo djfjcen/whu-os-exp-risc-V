@@ -167,6 +167,7 @@ u64 syscall_open(void) {
     f->ip = ip;
     f->readable = !(omode & O_WRONLY);
     f->writable = (omode & O_WRONLY) || (omode & O_RDWR);
+    f->append = !!(omode & O_APPEND);  // 转换为布尔值
     
     iunlock(ip);
     end_op();
@@ -300,3 +301,108 @@ u64 syscall_unlink(void) {
     
     return 0;
 }
+
+// fstat - 获取打开文件的stat信息
+u64 syscall_fstat(void) {
+    struct File *f;
+    u64 st_addr;
+    struct stat st;
+    int fd;
+    
+    argint(0, &fd);
+    argaddr(1, &st_addr);
+    
+    if(fd < 0 || fd >= NOFILE || (f = curr_proc->ofile[fd]) == 0)
+        return -1;
+    
+    if(f->type != FILE_INODE)
+        return -1;
+    
+    ilock(f->ip);
+    stati(f->ip, &st);
+    iunlock(f->ip);
+    
+    if(copy_k2u(curr_proc->page_table, (addr_t)st_addr, (addr_t)&st, sizeof(st)) < 0)
+        return -1;
+    
+    return 0;
+}
+
+// dup - 复制文件描述符
+u64 syscall_dup(void) {
+    struct File *f;
+    int fd, newfd;
+    
+    argint(0, &fd);
+    
+    if(fd < 0 || fd >= NOFILE || (f = curr_proc->ofile[fd]) == 0)
+        return -1;
+    
+    if((newfd = fdalloc(f)) < 0)
+        return -1;
+    
+    file_dup(f);
+    return newfd;
+}
+
+// link - 创建硬链接
+u64 syscall_link(void) {
+    char oldpath[128], newpath[128], name[DIRSIZ];
+    struct inode *ip, *dp;
+    u64 oldpath_ptr, newpath_ptr;
+    
+    argaddr(0, &oldpath_ptr);
+    argaddr(1, &newpath_ptr);
+    
+    if(copy_u2k(curr_proc->page_table, (addr_t)oldpath, (addr_t)oldpath_ptr, sizeof(oldpath)) < 0)
+        return -1;
+    if(copy_u2k(curr_proc->page_table, (addr_t)newpath, (addr_t)newpath_ptr, sizeof(newpath)) < 0)
+        return -1;
+    
+    oldpath[127] = 0;
+    newpath[127] = 0;
+    
+    begin_op();
+    
+    if((ip = namei(oldpath)) == 0) {
+        end_op();
+        return -1;
+    }
+    
+    ilock(ip);
+    
+    if(ip->type == T_DIR) {
+        iunlockput(ip);
+        end_op();
+        return -1;
+    }
+    
+    ip->nlink++;
+    iupdate(ip);
+    iunlock(ip);
+    
+    if((dp = nameiparent(newpath, name)) == 0)
+        goto bad;
+    
+    ilock(dp);
+    
+    if(dp->dev != ip->dev || dirlink(dp, name, ip->inum) < 0) {
+        iunlockput(dp);
+        goto bad;
+    }
+    
+    iunlockput(dp);
+    iput(ip);
+    
+    end_op();
+    return 0;
+
+bad:
+    ilock(ip);
+    ip->nlink--;
+    iupdate(ip);
+    iunlockput(ip);
+    end_op();
+    return -1;
+}
+

@@ -16,6 +16,7 @@ struct File {
     int ref;         // 引用计数
     char readable;
     char writable;
+    char append;     // 追加模式
     struct inode *ip;  // 文件对应的 inode
     u64 off;          // 文件偏移量
     short major;      // 设备号（设备文件）

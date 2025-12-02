@@ -18,6 +18,12 @@ struct File* alloc_file(void) {
     for(int i = 0; i < NFILE; i++) {
         if(ftable.file[i].ref == 0) {
             ftable.file[i].ref = 1;
+            ftable.file[i].type = FILE_NONE;
+            ftable.file[i].readable = 0;
+            ftable.file[i].writable = 0;
+            ftable.file[i].append = 0;
+            ftable.file[i].ip = 0;
+            ftable.file[i].off = 0;
             return &ftable.file[i];
         }
     }
@@ -85,6 +91,13 @@ int file_write(struct File *f, u64 addr, int n) {
         return -1;
     
     if(f->type == FILE_INODE) {
+        // 如果是追加模式，先移动到文件末尾
+        if(f->append) {
+            ilock(f->ip);
+            f->off = f->ip->size;
+            iunlock(f->ip);
+        }
+        
         // 写入可能扩展文件，因此需要分多次提交事务
         int max = ((LOGSIZE - 1 - 1 - 2) / 2) * BSIZE;
         int i = 0;
@@ -95,6 +108,11 @@ int file_write(struct File *f, u64 addr, int n) {
             
             begin_op();
             ilock(f->ip);
+            
+            // 追加模式每次写入前都要确保在文件末尾
+            if(f->append)
+                f->off = f->ip->size;
+            
             r = writei(f->ip, 1, addr + i, f->off, n1);
             if(r > 0)
                 f->off += r;

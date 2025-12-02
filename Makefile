@@ -53,6 +53,9 @@ all: kernel.bin user_main.bin
 %.o: %.c
 	$(CC) $(CFLAGS) -c $< -o $@
 
+# 默认目标 - 放在最前面
+all: kernel.bin
+
 # 用户程序编译
 user/%.o: user/%.c
 	$(CC) $(USER_CFLAGS) -c $< -o $@
@@ -69,11 +72,12 @@ user_main.bin: user_main.elf
 kernel/userprog_data.h: user_main.bin
 	./scripts/bin2c.sh $< $@ user_main_bin
 
-# 默认目标
-all: kernel.bin kernel/userprog_data.h
+# kernel/userprog.o 依赖生成的头文件
+kernel/userprog.o: kernel/userprog.c kernel/userprog_data.h
+	$(CC) $(CFLAGS) -c kernel/userprog.c -o kernel/userprog.o
 
-# 链接内核
-kernel.elf: $(OBJS) kernel.ld
+# 链接内核 - 需要先生成 userprog_data.h
+kernel.elf: kernel/userprog_data.h $(OBJS) kernel.ld
 	$(LD) -T kernel.ld -o $@ $(OBJS)
 
 # 生成原始二进制

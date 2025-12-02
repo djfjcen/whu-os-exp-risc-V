@@ -15,6 +15,9 @@
 #define SYSCALL_WRITE 10
 #define SYSCALL_MKDIR 11
 #define SYSCALL_UNLINK 12
+#define SYSCALL_FSTAT 13
+#define SYSCALL_DUP 14
+#define SYSCALL_LINK 15
 
 void syscall();
 void argint(int n, int *ip);

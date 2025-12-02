@@ -13,7 +13,7 @@
 
 // inode 块地址数组参数
 #define NDIRECT 12                  // 直接块数量
-#define NINDIRECT (BSIZE / sizeof(u64))  // 间接块数量
+#define NINDIRECT (BSIZE / sizeof(u32))  // 间接块数量
 #define MAXFILE (NDIRECT + NINDIRECT)    // 最大文件块数
 
 // 文件系统布局：
@@ -37,8 +37,8 @@ struct dinode {
     short major;              // 主设备号（设备文件）
     short minor;              // 次设备号（设备文件）
     short nlink;              // 硬链接数
-    u64 size;                 // 文件大小（字节）
-    u64 addrs[NDIRECT + 1];   // 数据块地址数组
+    u32 size;                 // 文件大小（字节）
+    u32 addrs[NDIRECT + 1];   // 数据块地址数组
 };
 
 // 内存中的 inode 结构
@@ -52,8 +52,8 @@ struct inode {
     short major;       // 主设备号
     short minor;       // 次设备号
     short nlink;       // 硬链接数
-    u64 size;          // 文件大小（字节）
-    u64 addrs[NDIRECT + 1];  // 数据块地址数组
+    u32 size;          // 文件大小（字节）
+    u32 addrs[NDIRECT + 1];  // 数据块地址数组
 };
 
 // 目录项结构
@@ -81,12 +81,22 @@ struct dirent {
 #define T_FILE  2   // 普通文件
 #define T_DEVICE 3  // 设备
 
+// 文件stat结构
+struct stat {
+    int dev;     // 文件系统的磁盘设备
+    u64 ino;     // Inode号
+    short type;  // 文件类型
+    short nlink; // 指向文件的链接数
+    u64 size;    // 文件字节数
+};
+
 // 文件打开标志
 #define O_RDONLY  0x000
 #define O_WRONLY  0x001
 #define O_RDWR    0x002
 #define O_CREATE  0x200
 #define O_TRUNC   0x400
+#define O_APPEND  0x800
 
 // 文件系统函数声明
 void fs_init(int dev);
@@ -107,5 +117,6 @@ struct inode* dirlookup(struct inode *dp, char *name, u64 *poff);
 int dirlink(struct inode *dp, char *name, u64 inum);
 struct inode* namei(char *path);
 struct inode* nameiparent(char *path, char *name);
+void stati(struct inode *ip, struct stat *st);
 
 #endif // _FS_H_

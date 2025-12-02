@@ -7,7 +7,7 @@
 struct superblock sb;
 
 // inode 缓存
-#define NINODE 50
+#define NINODE 100
 struct {
     struct inode inode[NINODE];
 } icache;
@@ -16,12 +16,16 @@ struct {
 void fs_init(int dev) {
     struct buf *bp;
     
+    printf("[fs_init] Starting, dev=%d\n", (int)dev);
     bio_init();
+    printf("[fs_init] bio_init done\n");
     
     // 读取超级块
     bp = bread(dev, 1);
+    printf("[fs_init] bread(dev=1) done\n");
     mem_move(&sb, bp->data, sizeof(sb));
     brelse(bp);
+    printf("[fs_init] superblock read, magic=0x%x\n", (int)sb.magic);
     
     // 如果超级块魔数不匹配，创建新的文件系统
     if(sb.magic != FSMAGIC) {
@@ -47,7 +51,28 @@ void fs_init(int dev) {
         printf("  size=%d nblocks=%d ninodes=%d\n", 
                (int)sb.size, (int)sb.nblocks, (int)sb.ninodes);
         
+        printf("[fs_init] Calling log_init...\n");
         log_init(dev, &sb);
+        printf("[fs_init] log_init done\n");
+        
+        // 初始化位图,标记所有系统块为已使用
+        // 系统块: 引导块(0)、超级块(1)、日志(2-31)、inode(32-57)、位图(58)
+        printf("fs_init: marking system blocks 0-%d as used\n", (int)sb.bmapstart);
+        
+        printf("[fs_init] Calling begin_op...\n");
+        begin_op();
+        printf("[fs_init] begin_op done\n");
+        // 第一个位图块在 sb.bmapstart
+        bp = bread(dev, sb.bmapstart);
+        // 标记块 0 到 sb.bmapstart
+        for(int b = 0; b <= sb.bmapstart; b++) {
+            int bi = b % BPB;  // 在位图中的位索引
+            int m = 1 << (bi % 8);
+            bp->data[bi / 8] |= m;
+        }
+        log_write(bp);
+        brelse(bp);
+        end_op();
         
         // 创建根目录
         struct inode *root;
@@ -56,7 +81,7 @@ void fs_init(int dev) {
         if(root->inum != ROOTINO)
             panic("fs_init: root inode != ROOTINO");
         ilock(root);
-        root->nlink = 1;
+        root->nlink = 2;  // 至少需要 2 个链接：自己和 "."
         root->size = 0;
         iupdate(root);
         
@@ -125,6 +150,7 @@ struct inode* ialloc(u64 dev, short type) {
     int inum;
     struct buf *bp;
     struct dinode *dip;
+    struct inode *ip;
     
     for(inum = 1; inum < sb.ninodes; inum++) {
         bp = bread(dev, IBLOCK(inum, sb));
@@ -135,7 +161,18 @@ struct inode* ialloc(u64 dev, short type) {
             dip->type = type;
             log_write(bp);
             brelse(bp);
-            return iget(dev, inum);
+            
+            // 获取 inode 并立即初始化其内存表示
+            ip = iget(dev, inum);
+            ip->type = type;
+            ip->major = 0;
+            ip->minor = 0;
+            ip->nlink = 0;
+            ip->size = 0;
+            mem_set((addr_t)ip->addrs, 0, sizeof(ip->addrs));
+            ip->valid = 1;  // 标记为有效，避免从磁盘重新加载
+            
+            return ip;
         }
         brelse(bp);
     }
@@ -161,10 +198,20 @@ struct inode* iget(u64 dev, u64 inum) {
     }
     
     // 未找到，分配新的缓存项
-    if(empty == 0)
-        panic("iget: no inodes");
+    if(empty == 0) {
+        // 尝试回收一个未使用的 inode
+        for(ip = &icache.inode[0]; ip < &icache.inode[NINODE]; ip++) {
+            if(ip->ref == 0) {
+                empty = ip;
+                break;
+            }
+        }
+        if(empty == 0)
+            panic("iget: no inodes");
+    }
     
     ip = empty;
+    // 清空旧数据，但不设置 type，让 ilock 从磁盘加载
     ip->dev = dev;
     ip->inum = inum;
     ip->ref = 1;
@@ -201,8 +248,10 @@ void ilock(struct inode *ip) {
         brelse(bp);
         ip->valid = 1;
         
-        if(ip->type == 0)
+        if(ip->type == 0) {
+            printf("ilock: no type for inum=%d, dev=%d\n", (int)ip->inum, (int)ip->dev);
             panic("ilock: no type");
+        }
     }
 }
 
@@ -233,6 +282,12 @@ void iupdate(struct inode *ip) {
 
 // 释放 inode
 void iput(struct inode *ip) {
+    // 保护根目录，永远不释放
+    if(ip->inum == ROOTINO && ip->ref == 1) {
+        ip->ref--;
+        return;
+    }
+    
     if(ip->ref == 1 && ip->valid && ip->nlink == 0) {
         // inode 无链接，释放它
         itrunc(ip);
@@ -252,7 +307,8 @@ void iunlockput(struct inode *ip) {
 
 // 将文件偏移映射到磁盘块
 static u64 bmap(struct inode *ip, u64 bn) {
-    u64 addr, *a;
+    u32 addr;
+    u32 *a;
     struct buf *bp;
     
     if(bn < NDIRECT) {
@@ -267,7 +323,7 @@ static u64 bmap(struct inode *ip, u64 bn) {
         if((addr = ip->addrs[NDIRECT]) == 0)
             ip->addrs[NDIRECT] = addr = fs_alloc(ip->dev);
         bp = bread(ip->dev, addr);
-        a = (u64*)bp->data;
+        a = (u32*)bp->data;
         if((addr = a[bn]) == 0) {
             a[bn] = addr = fs_alloc(ip->dev);
             log_write(bp);
@@ -284,7 +340,7 @@ static u64 bmap(struct inode *ip, u64 bn) {
 void itrunc(struct inode *ip) {
     int i, j;
     struct buf *bp;
-    u64 *a;
+    u32 *a;
     
     for(i = 0; i < NDIRECT; i++) {
         if(ip->addrs[i]) {
@@ -295,7 +351,7 @@ void itrunc(struct inode *ip) {
     
     if(ip->addrs[NDIRECT]) {
         bp = bread(ip->dev, ip->addrs[NDIRECT]);
-        a = (u64*)bp->data;
+        a = (u32*)bp->data;
         for(j = 0; j < NINDIRECT; j++) {
             if(a[j])
                 fs_free(ip->dev, a[j]);
@@ -528,4 +584,13 @@ struct inode* namei(char *path) {
 // 查找路径的父目录 inode
 struct inode* nameiparent(char *path, char *name) {
     return namex(path, 1, name);
+}
+
+// 将inode信息复制到stat结构
+void stati(struct inode *ip, struct stat *st) {
+    st->dev = ip->dev;
+    st->ino = ip->inum;
+    st->type = ip->type;
+    st->nlink = ip->nlink;
+    st->size = ip->size;
 }

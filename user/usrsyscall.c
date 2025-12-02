@@ -222,3 +222,64 @@ int sys_unlink( const char* path ) {
 
     return ret;
 }
+
+/// @brief 获取文件状态
+/// @param fd 文件描述符
+/// @param st stat结构指针
+/// @return 成功返回 0，失败返回 -1
+int sys_fstat( int fd, struct stat* st ) {
+    int ret;
+
+    asm volatile(
+        "mv a0, %1\n"    // a0 = fd
+        "mv a1, %2\n"    // a1 = st
+        "li a7, %3\n"
+        "ecall\n"
+        "mv %0, a0"
+        : "=r"( ret )
+        : "r"( fd ), "r"( st ), "i"( SYS_FSTAT )
+        : "memory"
+        );
+
+    return ret;
+}
+
+/// @brief 复制文件描述符
+/// @param fd 文件描述符
+/// @return 新的文件描述符，失败返回 -1
+int sys_dup( int fd ) {
+    int ret;
+
+    asm volatile(
+        "mv a0, %1\n"    // a0 = fd
+        "li a7, %2\n"
+        "ecall\n"
+        "mv %0, a0"
+        : "=r"( ret )
+        : "r"( fd ), "i"( SYS_DUP )
+        : "memory"
+        );
+
+    return ret;
+}
+
+/// @brief 创建硬链接
+/// @param oldpath 原文件路径
+/// @param newpath 新链接路径
+/// @return 成功返回 0，失败返回 -1
+int sys_link( const char* oldpath, const char* newpath ) {
+    int ret;
+
+    asm volatile(
+        "mv a0, %1\n"    // a0 = oldpath
+        "mv a1, %2\n"    // a1 = newpath
+        "li a7, %3\n"
+        "ecall\n"
+        "mv %0, a0"
+        : "=r"( ret )
+        : "r"( oldpath ), "r"( newpath ), "i"( SYS_LINK )
+        : "memory"
+        );
+
+    return ret;
+}
