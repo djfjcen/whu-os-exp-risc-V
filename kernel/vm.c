@@ -200,6 +200,13 @@ pgtbl_addr_t kvm_make( void ) {
         PTE_R | PTE_W
     );
 
+    // map virtio mmio region for disk driver
+    kvm_map(
+        kpgtbl, ( addr_t ) VIRTIO0, ( addr_t ) VIRTIO0,
+        PAGE_SIZE,
+        PTE_R | PTE_W
+    );
+
     //printf( "UART mapped.\n" );
 
     // 初始化 kernel text 段，只读、可执行

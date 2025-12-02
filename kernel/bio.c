@@ -13,9 +13,6 @@ struct {
 
 // 简化版本：不使用真实磁盘，使用内存模拟
 // 为简化实现，我们创建一个内存块数组来模拟磁盘
-#define FSSIZE 1000  // 文件系统块数
-static u8 disk_image[FSSIZE][BSIZE];
-
 void bio_init(void) {
     struct buf *b;
     
@@ -30,8 +27,7 @@ void bio_init(void) {
         bcache.head.next = b;
     }
     
-    // 初始化磁盘镜像为 0
-    mem_set((addr_t)disk_image, 0, sizeof(disk_image));
+    virtio_disk_init();
 }
 
 // 查找缓存块，如果不存在则分配一个
@@ -74,8 +70,7 @@ struct buf* bread(u64 dev, u64 blockno) {
     b = bget(dev, blockno);
     
     if(!b->valid) {
-        // 从"磁盘"读取数据
-        mem_move(b->data, disk_image[blockno], BSIZE);
+        virtio_disk_rw(b, 0);
         b->valid = 1;
     }
     
@@ -87,9 +82,7 @@ void bwrite(struct buf *b) {
     if(b->refcnt < 1)
         panic("bwrite");
     
-    // 写入"磁盘"
-    mem_move(disk_image[b->blockno], b->data, BSIZE);
-    b->disk = 0;
+    virtio_disk_rw(b, 1);
 }
 
 // 释放块

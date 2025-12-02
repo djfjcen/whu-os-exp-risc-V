@@ -21,6 +21,8 @@
 // qemu 将 UART 寄存器映射在上面的物理地址位置。
 #define UART0 0x10000000L
 #define UART0_IRQ 10
+#define VIRTIO0 0x10001000L
+#define VIRTIO0_IRQ 1
 
 // the kernel expects there to be RAM
 // for use by the kernel and user pages

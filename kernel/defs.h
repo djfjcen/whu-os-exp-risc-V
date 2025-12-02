@@ -74,6 +74,7 @@ u64 vm_fault( pgtbl_addr_t pgtbl, u64 va, int read );
 void trap_init( void );
 
 struct Process;
+struct buf;
 
 void process_init( void );
 void user_init( void );
@@ -94,6 +95,11 @@ int kexec( const char* path, char* const argv[] );
 // 文件系统相关函数
 void fs_init(int dev);
 void file_init(void);
+
+// virtio disk
+void virtio_disk_init(void);
+void virtio_disk_rw(struct buf *b, int write);
+void virtio_disk_intr(void);
 
 #define assert(expr) \
     do { \

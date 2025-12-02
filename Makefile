@@ -33,6 +33,7 @@ KERNEL_SRCS = \
 	kernel/userprog.c \
 	kernel/bio.c \
 	kernel/log.c \
+	kernel/virtio_disk.c \
 	kernel/fs.c \
 	kernel/file.c \
 	kernel/sysfile.c
@@ -92,5 +93,7 @@ clean:
 run: kernel.bin
 	qemu-system-riscv64 -machine virt -bios none \
 		-kernel kernel.bin \
+		-drive file=fs.img,if=none,format=raw,id=x0 \
+		-device virtio-blk-device,drive=x0,bus=virtio-mmio-bus.0 \
 		-m 256M \
 		-nographic

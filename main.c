@@ -22,10 +22,48 @@ void print_int( int n ) {
     }
 }
 
+static void cleanup_test_artifacts(void) {
+    sys_print("\n清理测试生成的文件和目录...\n");
+
+    // 单个文件
+    sys_unlink("/test");
+    sys_unlink("/testfile");
+    sys_unlink("/shared_file");
+    sys_unlink("/crash_test");
+    sys_unlink("/large_file");
+
+    // 目录内容和目录本身
+    sys_unlink("/testdir/file1");
+    sys_unlink("/testdir/file2");
+    sys_unlink("/testdir");
+    sys_unlink("/dir");
+
+    // 批量小文件 /small_XX
+    char filename[16];
+    for ( int i = 0; i < 30; i++ ) {
+        int pos = 0;
+        filename[pos++] = '/';
+        filename[pos++] = 's';
+        filename[pos++] = 'm';
+        filename[pos++] = 'a';
+        filename[pos++] = 'l';
+        filename[pos++] = 'l';
+        filename[pos++] = '_';
+        if ( i >= 10 ) {
+            filename[pos++] = '0' + ( i / 10 );
+        }
+        filename[pos++] = '0' + ( i % 10 );
+        filename[pos] = '\0';
+        sys_unlink( filename );
+    }
+}
+
 int main() {
     sys_print( "=== main() ===\n\n" );
 
     sys_print( "=== 测试文件系统 ===\n\n" );
+
+    cleanup_test_artifacts();
 
     // 测试 1: 创建文件并写入
     sys_print( "测试 1: 创建文件并写入\n" );
@@ -412,6 +450,8 @@ int main() {
     
     sys_print( "=== 所有高级测试完成 ===\n\n" );
 
+    cleanup_test_artifacts();
+
     // 系统调用测试已注释
     /*
     sys_print( "运行其他测试...\n\n" );
@@ -575,41 +615,53 @@ int main() {
     sys_print("2. 每次事务提交后,日志都会被正确写入\n");
     sys_print("3. 如果系统崩溃,下次启动时会从日志恢复\n\n");
     
-    sys_print("测试: 创建10个文件,每个文件写入32字节\n");
-    for(int i = 0; i < 10; i++) {
-        char filename[32];
-        // 简单的整数转字符串
-        filename[0] = '/';
-        filename[1] = 'l';
-        filename[2] = 'o';
-        filename[3] = 'g';
-        filename[4] = '_';
-        filename[5] = '0' + (i / 10);
-        filename[6] = '0' + (i % 10);
-        filename[7] = '\0';
-        
-        int fd = sys_open(filename, O_CREATE | O_RDWR);
-        if(fd < 0) {
-            sys_print("创建文件失败: ");
+    int logs_exist = 1;
+    int check_fd = sys_open("/log_00", O_RDONLY);
+    if(check_fd < 0) {
+        logs_exist = 0;
+    } else {
+        sys_close(check_fd);
+    }
+
+    if(!logs_exist) {
+        sys_print("测试: 创建10个文件,每个文件写入32字节\n");
+        for(int i = 0; i < 10; i++) {
+            char filename[32];
+            // 简单的整数转字符串
+            filename[0] = '/';
+            filename[1] = 'l';
+            filename[2] = 'o';
+            filename[3] = 'g';
+            filename[4] = '_';
+            filename[5] = '0' + (i / 10);
+            filename[6] = '0' + (i % 10);
+            filename[7] = '\0';
+            
+            int wfd = sys_open(filename, O_CREATE | O_RDWR);
+            if(wfd < 0) {
+                sys_print("创建文件失败: ");
+                sys_print(filename);
+                sys_print("\n");
+                continue;
+            }
+            
+            char content[32];
+            for(int j = 0; j < 31; j++) {
+                content[j] = 'A' + (i % 26);
+            }
+            content[31] = '\n';
+            
+            int n = sys_write(wfd, content, 32);
+            sys_close(wfd);
+            
+            sys_print("创建文件 ");
             sys_print(filename);
-            sys_print("\n");
-            continue;
+            sys_print(", 写入 ");
+            print_int(n);
+            sys_print(" 字节\n");
         }
-        
-        char content[32];
-        for(int j = 0; j < 31; j++) {
-            content[j] = 'A' + (i % 26);
-        }
-        content[31] = '\n';
-        
-        int n = sys_write(fd, content, 32);
-        sys_close(fd);
-        
-        sys_print("创建文件 ");
-        sys_print(filename);
-        sys_print(", 写入 ");
-        print_int(n);
-        sys_print(" 字节\n");
+    } else {
+        sys_print("检测到已有日志文件，跳过创建阶段\n");
     }
     
     sys_print("\n验证文件内容:\n");
