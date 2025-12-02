@@ -1,5 +1,6 @@
 #include "proc.h"
 #include "memlayout.h"
+#include "file.h"
 
 // 定义在 trampoline.S 中
 extern char trampoline[];
@@ -228,6 +229,11 @@ int init_process( struct Process* proc ) {
         return 0;
     }
 
+    // 初始化文件描述符数组
+    for(int i = 0; i < NOFILE; i++) {
+        proc->ofile[i] = 0;
+    }
+
     // 清空 context 结构体
     mem_set( ( addr_t ) &proc->context, 0, sizeof( struct Context ) );
 
@@ -308,6 +314,12 @@ int kfork() {
 
     // 设置子进程的 a0 寄存器为 0，以便区分父子进程
     np->trapframe->a0 = 0;
+
+    // 复制父进程的文件描述符
+    for(int i = 0; i < NOFILE; i++) {
+        if(curr_proc->ofile[i])
+            np->ofile[i] = file_dup(curr_proc->ofile[i]);
+    }
 
     np->parent = curr_proc;
 
@@ -427,6 +439,14 @@ void kexit( int status ) {
 
     if ( p == init_proc ) {
         panic( "kexit: init process exiting" );
+    }
+
+    // 关闭所有打开的文件
+    for(int fd = 0; fd < NOFILE; fd++) {
+        if(p->ofile[fd]) {
+            file_close(p->ofile[fd]);
+            p->ofile[fd] = 0;
+        }
     }
 
     // 将所有子进程交给 init 进程处理

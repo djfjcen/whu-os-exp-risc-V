@@ -1,6 +1,9 @@
 #ifndef _DEFS_H_
 #define _DEFS_H_
 
+typedef unsigned char u8;
+typedef unsigned short u16;
+typedef unsigned int u32;
 typedef unsigned long long u64;
 
 typedef void* addr_t;
@@ -87,6 +90,10 @@ pgtbl_addr_t alloc_proc_pgtbl( struct Process* p );
 void free_proc_pgtbl( pgtbl_addr_t pgtb, u64 size );
 
 int kexec( const char* path, char* const argv[] );
+
+// 文件系统相关函数
+void fs_init(int dev);
+void file_init(void);
 
 #define assert(expr) \
     do { \

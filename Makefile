@@ -30,7 +30,12 @@ KERNEL_SRCS = \
 	kernel/proc.c \
 	kernel/syscall.c \
 	kernel/kexec.c \
-	kernel/userprog.c
+	kernel/userprog.c \
+	kernel/bio.c \
+	kernel/log.c \
+	kernel/fs.c \
+	kernel/file.c \
+	kernel/sysfile.c
 
 # 用户程序源文件
 USER_SRCS = main.c user/usrsyscall.c

@@ -71,6 +71,9 @@ struct TrapFrame {
     /* 280 */ u64 t6;
 };
 
+// 文件描述符最大数量
+#define NOFILE 16
+
 /// @brief 进程的核心定义
 struct Process {
     int pid;
@@ -93,6 +96,9 @@ struct Process {
     addr_t kstack;
 
     u64 mem_size;
+    
+    // 打开的文件描述符
+    struct File *ofile[NOFILE];
 };
 
 #endif // !_PROC_H_

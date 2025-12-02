@@ -108,6 +108,14 @@ u64 syscall_kill() {
     return ( u64 ) kkill( pid );
 }
 
+// 文件系统相关系统调用（在 sysfile.c 中实现）
+u64 syscall_open(void);
+u64 syscall_close(void);
+u64 syscall_read(void);
+u64 syscall_write(void);
+u64 syscall_mkdir(void);
+u64 syscall_unlink(void);
+
 /// @brief 系统调用处理函数指针数组
 static u64( *syscalls[] )( void ) = {
     [SYSCALL_FORK] syscall_fork,
@@ -116,6 +124,12 @@ static u64( *syscalls[] )( void ) = {
     [SYSCALL_GETPID] syscall_getpid,
     [SYSCALL_PRINT] syscall_print,
     [SYSCALL_KILL] syscall_kill,
+    [SYSCALL_OPEN] syscall_open,
+    [SYSCALL_CLOSE] syscall_close,
+    [SYSCALL_READ] syscall_read,
+    [SYSCALL_WRITE] syscall_write,
+    [SYSCALL_MKDIR] syscall_mkdir,
+    [SYSCALL_UNLINK] syscall_unlink,
 };
 
 void syscall() {

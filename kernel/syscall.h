@@ -9,7 +9,15 @@
 #define SYSCALL_GETPID 4
 #define SYSCALL_PRINT 5
 #define SYSCALL_KILL 6
+#define SYSCALL_OPEN 7
+#define SYSCALL_CLOSE 8
+#define SYSCALL_READ 9
+#define SYSCALL_WRITE 10
+#define SYSCALL_MKDIR 11
+#define SYSCALL_UNLINK 12
 
 void syscall();
+void argint(int n, int *ip);
+void argaddr(int n, u64 *ip);
 
 #endif // !_SYSCALL_H_

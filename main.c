@@ -25,7 +25,53 @@ void print_int( int n ) {
 int main() {
     sys_print( "=== main() ===\n\n" );
 
-    sys_print( "运行测试...\n\n" );
+    sys_print( "=== 测试文件系统 ===\n\n" );
+
+    // 测试 1: 创建文件并写入
+    sys_print( "测试 1: 创建文件并写入\n" );
+    int fd = sys_open( "/test", O_CREATE | O_RDWR );
+    sys_print( "打开文件, fd=" );
+    print_int(fd);
+    sys_print( "\n" );
+    
+    if(fd >= 0) {
+        const char* msg = "Hello FS";
+        int len = 8;
+        int n = sys_write(fd, msg, len);
+        sys_print( "写入 " );
+        print_int(n);
+        sys_print( " 字节\n" );
+        sys_close(fd);
+        sys_print( "文件已关闭\n" );
+    }
+    sys_print("\n");
+
+    // 测试 2: 重新打开并读取
+    sys_print( "测试 2: 读取文件\n" );
+    fd = sys_open( "/test", O_RDONLY );
+    if(fd >= 0) {
+        char buf[32];
+        for(int i=0; i<32; i++) buf[i]=0;
+        int n = sys_read(fd, buf, 20);
+        sys_print( "读取 " );
+        print_int(n);
+        sys_print( " 字节: " );
+        sys_print(buf);
+        sys_print( "\n" );
+        sys_close(fd);
+    }
+    sys_print("\n");
+
+    // 测试 3: 创建目录
+    sys_print( "测试 3: 创建目录\n" );
+    int r = sys_mkdir("/dir");
+    sys_print( "mkdir 返回: " );
+    print_int(r);
+    sys_print( "\n\n" );
+
+    sys_print( "所有文件系统测试完成！\n\n" );
+
+    sys_print( "运行其他测试...\n\n" );
 
     sys_print( "=== 测试 fork 和 kill ===\n\n" );
 

@@ -1,4 +1,5 @@
 #include "defs.h"
+#include "fs.h"
 
 extern char _bss_start[], _bss_end[];
 
@@ -39,6 +40,14 @@ void call_main() {
     process_init();
 
     // printf( "Process subsystem initialized.\n" );
+
+    // 初始化文件系统
+    fs_init(ROOTDEV);
+    
+    // 初始化文件表
+    file_init();
+    
+    printf("File system initialized.\n");
 
     user_init();
 
