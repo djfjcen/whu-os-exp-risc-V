@@ -75,6 +75,11 @@ struct TrapFrame {
 #define NOFILE 16
 
 /// @brief 进程的核心定义
+// 进程优先级范围设置：数值越大，优先级越高
+#define PRIORITY_MIN 0
+#define PRIORITY_MAX 15
+#define PRIORITY_DEFAULT 8
+
 struct Process {
     int pid;
     struct Process* parent;
@@ -99,6 +104,9 @@ struct Process {
     
     // 打开的文件描述符
     struct File *ofile[NOFILE];
+
+    int priority;          // 静态优先级，由用户或内核指定
+    int priority_boost;    // 动态加权值，用于简单老化避免饥饿
 };
 
 #endif // !_PROC_H_

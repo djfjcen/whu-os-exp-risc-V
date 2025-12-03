@@ -68,6 +68,25 @@ int kkill( int pid ) {
     return -1;
 }
 
+int kset_priority( int priority ) {
+    if ( priority < PRIORITY_MIN || priority > PRIORITY_MAX || curr_proc == 0 ) {
+        return -1;
+    }
+
+    curr_proc->priority = priority;
+    curr_proc->priority_boost = 0;
+
+    return 0;
+}
+
+int kget_priority( void ) {
+    if ( curr_proc == 0 ) {
+        return -1;
+    }
+
+    return curr_proc->priority;
+}
+
 /// @brief 初始化进程表，将所有进程结构体标记为 UNUSED 状态
 void process_init() {
     for ( int i = 0; i < NPROC; i++ ) {
@@ -77,6 +96,8 @@ void process_init() {
 
         proc->state = UNUSED;
         proc->kstack = KSTACK( ( int ) ( proc - processes ) );
+        proc->priority = PRIORITY_DEFAULT;
+        proc->priority_boost = 0;
     }
 
     // 初始化 scheduler context，供第一次 swtch 使用
@@ -202,6 +223,8 @@ void free_process( struct Process* p ) {
     p->is_killed = 0;
     p->parent = 0;
     p->state = UNUSED;
+    p->priority = PRIORITY_DEFAULT;
+    p->priority_boost = 0;
 }
 
 /// @brief 在分配成功后初始化一个进程结构体
@@ -214,6 +237,8 @@ int init_process( struct Process* proc ) {
 
     proc->state = USED;
     proc->pid = alloc_pid();
+    proc->priority = PRIORITY_DEFAULT;
+    proc->priority_boost = 0;
 
     // 为本进程 trapframe 分配实际的物理页
     if ( ( proc->trapframe = ( struct TrapFrame* ) alloc_page() ) == 0 ) {
@@ -322,6 +347,8 @@ int kfork() {
     }
 
     np->parent = curr_proc;
+    np->priority = curr_proc->priority;
+    np->priority_boost = curr_proc->priority_boost;
 
     np->trapframe->epc = curr_proc->trapframe->epc;
 
@@ -331,6 +358,33 @@ int kfork() {
 }
 
 extern void swtch( struct Context* old, struct Context* new );
+
+static inline int effective_priority( struct Process* p ) {
+    int eff = p->priority + p->priority_boost;
+    if ( eff > PRIORITY_MAX ) {
+        eff = PRIORITY_MAX;
+    }
+    return eff;
+}
+
+static void boost_waiting_processes( struct Process* last_run ) {
+    for ( int idx = 0; idx < NPROC; idx++ ) {
+        struct Process* p = &processes[idx];
+
+        if ( p == last_run ) {
+            continue;
+        }
+
+        if ( p->state != RUNNABLE ) {
+            continue;
+        }
+
+        int max_boost = PRIORITY_MAX - p->priority;
+        if ( p->priority_boost < max_boost ) {
+            p->priority_boost++;
+        }
+    }
+}
 
 /// @brief 核心调度函数，负责选择下一个要运行的进程
 /// @param  
@@ -344,33 +398,45 @@ void scheduler( void ) {
         // 关闭中断，以防止在下面 WFI 和中断之间的竞争条件
         interrupt_off();
 
-
-        int found = 0;
+        struct Process* chosen = 0;
+        int best_priority = PRIORITY_MIN - 1;
 
         // 每次循环都从进程表开头扫描，确保刚被 wakeup() 的进程能被调度到
         for ( int idx = 0; idx < NPROC; idx++ ) {
             struct Process* p = &processes[idx];
 
-            if ( p->state == RUNNABLE ) {
+            if ( p->state != RUNNABLE ) {
+                continue;
+            }
 
-                p->state = RUNNING;
+            int eff = effective_priority( p );
 
-                curr_proc = p;
-
-                // perform context switch
-                swtch( sched_context, &p->context );
-
-                // 在这里进程已经完成运行
-                curr_proc = 0;
-
-                found = 1;
+            if ( !chosen || eff > best_priority || ( eff == best_priority && p->pid < chosen->pid ) ) {
+                chosen = p;
+                best_priority = eff;
             }
         }
 
-        if ( found == 0 ) {
+        if ( chosen == 0 ) {
             // 无可调用进程，等待中断唤醒
             asm volatile( "wfi" );
+            continue;
         }
+
+        chosen->state = RUNNING;
+        chosen->priority_boost = 0;
+
+        curr_proc = chosen;
+
+        // perform context switch
+        swtch( sched_context, &chosen->context );
+
+        struct Process* last_run = curr_proc;
+
+        // 在这里进程已经完成运行
+        curr_proc = 0;
+
+        boost_waiting_processes( last_run );
     }
 }
 

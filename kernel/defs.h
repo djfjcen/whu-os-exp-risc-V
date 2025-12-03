@@ -86,9 +86,12 @@ void prepare_return( void );
 int is_killed( struct Process* p );
 void set_killed( struct Process* p );
 int kkill( int pid );
+void yield( void );
 void wakeup( void* chan );
 pgtbl_addr_t alloc_proc_pgtbl( struct Process* p );
 void free_proc_pgtbl( pgtbl_addr_t pgtb, u64 size );
+int kset_priority( int priority );
+int kget_priority( void );
 
 int kexec( const char* path, char* const argv[] );
 

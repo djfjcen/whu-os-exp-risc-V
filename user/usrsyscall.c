@@ -283,3 +283,49 @@ int sys_link( const char* oldpath, const char* newpath ) {
 
     return ret;
 }
+
+int sys_setpriority( int priority ) {
+    int ret;
+
+    asm volatile(
+        "mv a0, %1\n"
+        "li a7, %2\n"
+        "ecall\n"
+        "mv %0, a0"
+        : "=r"( ret )
+        : "r"( priority ), "i"( SYS_SETPRIORITY )
+        : "memory"
+        );
+
+    return ret;
+}
+
+int sys_getpriority( void ) {
+    int ret;
+
+    asm volatile(
+        "li a7, %1\n"
+        "ecall\n"
+        "mv %0, a0"
+        : "=r"( ret )
+        : "i"( SYS_GETPRIORITY )
+        : "memory"
+        );
+
+    return ret;
+}
+
+int sys_yield( void ) {
+    int ret;
+
+    asm volatile(
+        "li a7, %1\n"
+        "ecall\n"
+        "mv %0, a0"
+        : "=r"( ret )
+        : "i"( SYS_YIELD )
+        : "memory"
+        );
+
+    return ret;
+}

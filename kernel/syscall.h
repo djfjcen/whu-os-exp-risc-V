@@ -18,6 +18,9 @@
 #define SYSCALL_FSTAT 13
 #define SYSCALL_DUP 14
 #define SYSCALL_LINK 15
+#define SYSCALL_SETPRIORITY 16
+#define SYSCALL_GETPRIORITY 17
+#define SYSCALL_YIELD 18
 
 void syscall();
 void argint(int n, int *ip);

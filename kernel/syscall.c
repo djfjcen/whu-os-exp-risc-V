@@ -108,6 +108,23 @@ u64 syscall_kill() {
     return ( u64 ) kkill( pid );
 }
 
+u64 syscall_setpriority() {
+    int priority;
+
+    argint( 0, &priority );
+
+    return ( u64 ) kset_priority( priority );
+}
+
+u64 syscall_getpriority() {
+    return ( u64 ) kget_priority();
+}
+
+u64 syscall_yield() {
+    yield();
+    return 0;
+}
+
 // 文件系统相关系统调用（在 sysfile.c 中实现）
 u64 syscall_open(void);
 u64 syscall_close(void);
@@ -136,6 +153,9 @@ static u64( *syscalls[] )( void ) = {
     [SYSCALL_FSTAT] syscall_fstat,
     [SYSCALL_DUP] syscall_dup,
     [SYSCALL_LINK] syscall_link,
+    [SYSCALL_SETPRIORITY] syscall_setpriority,
+    [SYSCALL_GETPRIORITY] syscall_getpriority,
+    [SYSCALL_YIELD] syscall_yield,
 };
 
 void syscall() {

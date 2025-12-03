@@ -18,6 +18,9 @@
 #define SYS_FSTAT 13
 #define SYS_DUP 14
 #define SYS_LINK 15
+#define SYS_SETPRIORITY 16
+#define SYS_GETPRIORITY 17
+#define SYS_YIELD 18
 
 #define O_RDONLY  0x000
 #define O_WRONLY  0x001
@@ -55,5 +58,8 @@ int sys_unlink( const char* path );
 int sys_fstat( int fd, struct stat* st );
 int sys_dup( int fd );
 int sys_link( const char* oldpath, const char* newpath );
+int sys_setpriority( int priority );
+int sys_getpriority( void );
+int sys_yield( void );
 
 #endif // !_USR_SYSCALL_H_
